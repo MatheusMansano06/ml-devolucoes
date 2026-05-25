@@ -1,0 +1,286 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                  ARQUITETURA COMPLETA - MÓDULO DE DEVOLUÇÕES                 ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+📱 NAVEGADOR DO USUÁRIO
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ http://127.0.0.1:5000/devolucoes                                           │
+│                                                                             │
+│ ┌─ HTML (Jinja2 Template) ──────────────────────────────────────────────┐  │
+│ │ ┌─────────────────────────────────────────────────────────────────┐   │  │
+│ │ │ Gestão de Devoluções (Multiplataforma)                          │   │  │
+│ │ ├─────────────────────────────────────────────────────────────────┤   │  │
+│ │ │ [Backend: 🟢 OK]  [Frontend: 🟡 Aguardando...]               │   │  │
+│ │ │ [Autorizar ML] [Abrir ferramenta] [Parar]                      │   │  │
+│ │ ├─────────────────────────────────────────────────────────────────┤   │  │
+│ │ │                                                                 │   │  │
+│ │ │   ┌─────────────────────────────────────────────────────────┐   │   │  │
+│ │ │   │ <iframe src="/devolucoes-app/">                         │   │   │  │
+│ │ │   │   └─ Carregando ferramenta...                           │   │   │  │
+│ │ │   │   (mostra React App de devoluções)                      │   │   │  │
+│ │ │   └─────────────────────────────────────────────────────────┘   │   │  │
+│ │ │                                                                 │   │  │
+│ │ │ Logs:                                                           │   │  │
+│ │ │ backend: iniciado                                               │   │  │
+│ │ │ backend: health check ok                                        │   │  │
+│ │ │ frontend: iniciado                                              │   │  │
+│ │ │ frontend: vite compilando...                                    │   │  │
+│ │ │ frontend: ✅ build sucesso                                     │   │  │
+│ │ └─────────────────────────────────────────────────────────────────┘   │  │
+│ └─ JavaScript (hot reload, resize iframe) ──────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+                      SERVIDOR FLASK (Python)
+                     127.0.0.1:5000 (seller-hub)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  Rota 1: GET /devolucoes                                                  │
+│  ├─ Verifica: session["logged_in"] ✓                                      │
+│  ├─ Chama: devolucoes_runner.start()                                      │
+│  └─ Retorna: template com snapshot                                        │
+│                                                                             │
+│  Rota 2: POST /devolucoes/start                                           │
+│  ├─ Verifica: session["logged_in"] ✓                                      │
+│  ├─ Chama: devolucoes_runner.start()                                      │
+│  └─ Redireciona: GET /devolucoes                                          │
+│                                                                             │
+│  Rota 3: POST /devolucoes/stop                                            │
+│  ├─ Verifica: session["logged_in"] ✓                                      │
+│  ├─ Chama: devolucoes_runner.stop()                                       │
+│  └─ Redireciona: GET /devolucoes                                          │
+│                                                                             │
+│  Rota 4: GET /devolucoes-app/                                             │
+│  ├─ Proxy para: http://127.0.0.1:5173/devolucoes-app/                    │
+│  └─ Retorna: HTML/JS da ferramenta (Frontend React)                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+                    PYTHON MANAGER (src/devolucoes_app.py)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  Classe: DevolucoesAppRunner                                              │
+│  ├─ __init__(project_dir)                                                 │
+│  │  └─ self.project_dir = "C:\...\projeto-devolucoes"                    │
+│  │  └─ self.backend_process = None                                        │
+│  │  └─ self.frontend_process = None                                       │
+│  │  └─ self.logs = deque(maxlen=400)                                      │
+│  │                                                                         │
+│  ├─ start() → INICIA SUBPROCESSOS                                         │
+│  │  │                                                                     │
+│  │  ├─ Backend:                                                          │
+│  │  │  ├─ cwd = projeto-devolucoes/backend/                             │
+│  │  │  ├─ cmd = npm start                                               │
+│  │  │  └─ porta = 3001                                                   │
+│  │  │  └─ envia variáveis de .env                                        │
+│  │  │  └─ coleta stdout/stderr em thread daemon                          │
+│  │  │                                                                     │
+│  │  └─ Frontend:                                                         │
+│  │     ├─ cwd = projeto-devolucoes/frontend/                            │
+│  │     ├─ cmd = npm run dev --host 127.0.0.1 --port 5173               │
+│  │     ├─ --base /devolucoes-app/                                       │
+│  │     └─ porta = 5173                                                   │
+│  │     └─ coleta stdout/stderr em thread daemon                          │
+│  │                                                                         │
+│  ├─ stop() → PARA SUBPROCESSOS                                           │
+│  │  ├─ frontend_process.terminate() (SIGTERM)                           │
+│  │  └─ backend_process.terminate() (SIGTERM)                            │
+│  │                                                                         │
+│  └─ snapshot() → ESTADO ATUAL                                            │
+│     ├─ backend_ok = GET http://127.0.0.1:3001/health                   │
+│     ├─ frontend_ok = GET http://127.0.0.1:5173                         │
+│     ├─ running = if process.poll() is None                             │
+│     └─ logs = list(self.logs) últimas 400 linhas                        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                        ↙                              ↘
+            BACKEND NODE.JS                    FRONTEND REACT
+       projeto-devolucoes/backend              projeto-devolucoes/frontend
+         (npm start, port 3001)               (npm run dev, port 5173)
+┌──────────────────────────────────┐  ┌────────────────────────────────────┐
+│                                  │  │                                    │
+│  Estrutura:                      │  │  Estrutura:                        │
+│  ├─ src/                         │  │  ├─ src/                          │
+│  │  ├─ index.js                  │  │  │  ├─ App.jsx (raiz)             │
+│  │  │  (express app)             │  │  │  ├─ main.jsx (entry point)     │
+│  │  │                            │  │  │  ├─ components/                │
+│  │  ├─ routes/                   │  │  │  │  ├─ DevolutionsList.jsx     │
+│  │  │  ├─ devolutions.js         │  │  │  │  ├─ DevolutionDetail.jsx    │
+│  │  │  ├─ mercadolivre.js        │  │  │  │  └─ Actions.jsx             │
+│  │  │  └─ shopee.js              │  │  │  └─ pages/                     │
+│  │  │                            │  │  │     └─ index.jsx               │
+│  │  ├─ services/                 │  │  ├─ vite.config.js                │
+│  │  │  └─ ml_api.js              │  │  └─ package.json                  │
+│  │  │  └─ shopee_api.js          │  │                                    │
+│  │  │                            │  │  Funcionalidade:                   │
+│  │  └─ middleware/               │  │  ├─ Lista devoluções               │
+│  │     └─ auth.js                │  │  ├─ Detalhes de cada uma           │
+│  │                               │  │  ├─ Botões (aceitar, rejeitar)     │
+│  ├─ package.json                 │  │  ├─ Filters/Search                 │
+│  └─ node_modules/                │  │  └─ Status em tempo real            │
+│                                  │  │                                    │
+│  Endpoints:                      │  │  Comunica com:                     │
+│  ├─ GET /health                  │  │  ├─ Backend (GET /api/...)         │
+│  │  └─ { status: 'ok' }          │  │  ├─ Backend (POST /api/...)        │
+│  │                               │  │  └─ Armazena estado local          │
+│  ├─ GET /api/devolutions         │  │                                    │
+│  │  └─ retorna lista de devol.   │  │  Usa:                              │
+│  │                               │  │  ├─ React Hooks (useState, useEffect)
+│  ├─ POST /api/devolutions/:id/ac │  │  ├─ Fetch API para chamadas       │
+│  │  └─ aceita devolução          │  │  ├─ CSS para estilo               │
+│  │                               │  │  └─ React Router (navegação)       │
+│  ├─ POST /api/devolutions/:id/re │  │                                    │
+│  │  └─ rejeita devolução         │  │                                    │
+│  │                               │  │                                    │
+│  Integra com:                    │  │                                    │
+│  ├─ Mercado Livre API            │  │                                    │
+│  │  └─ OAuth token (em .env)     │  │                                    │
+│  │  └─ GET/PUT /devolutions      │  │                                    │
+│  │                               │  │                                    │
+│  └─ Shopee API                   │  │                                    │
+│     └─ Access token (em .env)    │  │                                    │
+│     └─ GET/PUT /returns          │  │                                    │
+│                                  │  │                                    │
+└──────────────────────────────────┘  └────────────────────────────────────┘
+
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                         FLUXO DE UMA REQUISIÇÃO                              ║
+║               "Usuário clica ACEITAR devolução"                              ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+1. Frontend (React)
+   ├─ onClick: handleAccept(devolutionId)
+   └─ fetch('http://127.0.0.1:3001/api/devolutions/123/accept', {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Item danificado' })
+      })
+                    ↓
+2. Backend (Node.js) - Route Handler
+   ├─ POST /api/devolutions/123/accept
+   ├─ Recebe: { reason: 'Item danificado' }
+   ├─ 1. Busca devolution no BD
+   │     const dev = await Devolution.findById(123)
+   ├─ 2. Atualiza BD
+   │     dev.status = 'accepted'
+   │     dev.reason = 'Item danificado'
+   │     await dev.save()
+   ├─ 3. Atualiza no Mercado Livre
+   │     await ml_api.acceptDevolution(123)
+   │        └─ PUT https://api.mercadolivre.com/devolutions/123
+   │           headers: Authorization: Bearer <ML_TOKEN>
+   │           body: { status: 'accepted' }
+   ├─ 4. Atualiza no Shopee (se aplicável)
+   │     await shopee_api.acceptDevolution(123)
+   │        └─ PUT https://api.shopee.com/returns/123
+   │           headers: Authorization: Bearer <SHOPEE_TOKEN>
+   │           body: { status: 'accepted' }
+   └─ res.json({ id: 123, status: 'accepted', ... })
+                    ↓
+3. Frontend (React) - recebe resposta
+   ├─ Status 200 OK
+   ├─ Atualiza estado: setDevolutions([...])
+   ├─ Mostra notificação: "✅ Devolução aceita!"
+   └─ UI se atualiza automaticamente
+                    ↓
+4. Usuário vê a mudança
+   ├─ Status muda de "Pendente" para "Aceita"
+   ├─ Cor muda (amarelo → verde)
+   └─ Devolution sai da lista "Pendentes"
+
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    VARIÁVEIS DE AMBIENTE (.env)                              ║
+║                 Usadas pelo módulo de devoluções                             ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+Seller Hub:
+  DEVOLUCOES_PROJECT_DIR=C:\...\projeto-devolucoes
+  DEVOLUCOES_BACKEND_PORT=3001
+  DEVOLUCOES_FRONTEND_PORT=5173
+
+Backend (projeto-devolucoes/backend):
+  ML_CLIENT_ID=...         (OAuth)
+  ML_CLIENT_SECRET=...     (OAuth)
+  ML_ACCESS_TOKEN=...      (ou obtém automaticamente)
+  SHOPEE_ACCESS_TOKEN=...
+  SHOPEE_SHOP_ID=...
+  DATABASE_URL=...         (se usar BD)
+
+Frontend:
+  (carrega via window.CONFIG ou hardcoded)
+
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                      SEQUÊNCIA DE INICIALIZAÇÃO                              ║
+║            O que acontece quando você clica "Abrir ferramenta"               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+T=0s:   Usuário clica "Abrir ferramenta"
+        └─ POST /devolucoes/start
+
+T=0s:   Flask chama devolucoes_runner.start()
+        ├─ BACKEND inicia: npm start (cwd=backend/)
+        │  └─ Carrega dependências
+        │  └─ Inicia Express server
+        │  └─ Conecta no BD (se tiver)
+        │  └─ Expõe porta 3001
+        │
+        └─ FRONTEND inicia: npm run dev (cwd=frontend/)
+           └─ Carrega dependências (se não em cache)
+           └─ Inicia Vite dev server
+           └─ Expõe porta 5173
+           └─ Começa compilação de React
+
+T=1-2s: Backend respondendo em 3001
+        └─ logs: "backend: listening on port 3001"
+        └─ HTML mostra [Backend: ✅ OK]
+
+T=3-5s: Frontend pronto em 5173
+        └─ logs: "frontend: VITE v5.0.0 building for production..."
+        └─ logs: "frontend: ✅ built successfully"
+        └─ HTML mostra [Frontend: ✅ OK]
+
+T=5s:   <iframe src="/devolucoes-app/"> é renderizado
+        └─ Proxy Flask redireciona para http://127.0.0.1:5173/devolucoes-app/
+        └─ Frontend React carrega
+        └─ React chama GET /api/devolutions (backend)
+        └─ Lista de devoluções aparece
+
+T=6s:   Tudo pronto!
+        └─ Usuário vê interface funcional
+        └─ Pode aceitar/rejeitar devoluções
+
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                           TROUBLESHOOTING                                     ║
+║                Onde procurar se algo der errado                              ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+Backend não responde (3001):
+  └─ Ver logs Python na página: "backend: ..."
+  └─ Procurar erro como "EADDRINUSE" (porta em uso)
+  └─ Solução: kill processo ou mudar porta em .env
+
+Frontend não carrega (5173):
+  └─ Ver logs Python: "frontend: ..."
+  └─ Procurar erro como "Cannot find module"
+  └─ Solução: npm install ou restart npm run dev
+
+Devoluções não aparecem:
+  └─ Abrir DevTools (F12) → Network
+  └─ Procurar GET /api/devolutions
+  └─ Ver status (200? 500?)
+  └─ Ver resposta (lista vazia? erro?)
+  └─ Verificar BD/credenciais de API
+
+Botão não funciona:
+  └─ F12 → Console → procurar erro vermelho
+  └─ Procurar função em código (ctrl+shift+f)
+  └─ Verificar se POST foi feito (Network tab)
+  └─ Verificar resposta do backend (status 200? erro?)
+
+Logs confusos:
+  └─ npm pode gerar muito output
+  └─ Procurar linhas com ✅ ou ❌ ou erro
+  └─ Procurar "listening on" ou "ready in"
+  └─ Se muitos erros, pode ser dependência faltante
