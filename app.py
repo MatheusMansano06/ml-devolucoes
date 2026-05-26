@@ -7,6 +7,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -20,6 +21,24 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_PATH = ROOT_DIR / ".env"
 DB_PATH = ROOT_DIR / "data" / "devolucoes.sqlite"
 UPLOAD_DIR = ROOT_DIR / "uploads"
+ML_CLASSIFIER_VERSION = "actions-v3"
+ML_ENRICHMENT_VERSION = "enrich-v1"
+
+MOTIVO_LABELS = {
+    "PDD9939": "O comprador se arrependeu",
+    "PDD9949": "O produto nao funciona",
+    "PDD9967": "Para retirar no correio",
+    "PDD9968": "Produto diferente",
+    "PDD9941": "Acessorio faltando",
+    "PDD9942": "Produto incompleto",
+    "PDD9944": "Produto danificado",
+    "PDD9946": "A embalagem chegou danificada",
+    "PDD9952": "Afetou a reputacao",
+}
+
+
+def motivo_label(reason_id: str | None) -> str:
+    return MOTIVO_LABELS.get(str(reason_id or ""), str(reason_id or "") or "-")
 
 STATUS_PERMITIDOS = {
     "aguardando_produto",
@@ -60,6 +79,10 @@ def db() -> sqlite3.Connection:
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row else None
+
+
+def json_dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def init_database() -> None:
@@ -128,6 +151,76 @@ def init_database() -> None:
               data_resultado TEXT,
               FOREIGN KEY (devolucao_id) REFERENCES devolucoes(id)
             );
+
+            CREATE TABLE IF NOT EXISTS ml_sync_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              tipo TEXT NOT NULL,
+              status TEXT NOT NULL,
+              iniciado_em TEXT NOT NULL,
+              finalizado_em TEXT,
+              total_declarado INTEGER DEFAULT 0,
+              total_encontrado INTEGER DEFAULT 0,
+              total_processado INTEGER DEFAULT 0,
+              total_erros INTEGER DEFAULT 0,
+              detalhes TEXT DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_raw_payloads (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              sync_run_id INTEGER,
+              resource_type TEXT NOT NULL,
+              resource_id TEXT NOT NULL,
+              claim_id TEXT DEFAULT '',
+              payload TEXT NOT NULL,
+              captured_at TEXT NOT NULL,
+              UNIQUE(resource_type, resource_id),
+              FOREIGN KEY (sync_run_id) REFERENCES ml_sync_runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_reconciliation_diffs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              sync_run_id INTEGER NOT NULL,
+              tipo TEXT NOT NULL,
+              severidade TEXT NOT NULL,
+              referencia TEXT DEFAULT '',
+              detalhe TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (sync_run_id) REFERENCES ml_sync_runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_trace_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              trace_id TEXT NOT NULL,
+              sync_run_id INTEGER,
+              step TEXT NOT NULL,
+              status TEXT NOT NULL,
+              duration_ms INTEGER DEFAULT 0,
+              claim_id TEXT DEFAULT '',
+              details TEXT DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (sync_run_id) REFERENCES ml_sync_runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_claim_classifications (
+              claim_id TEXT PRIMARY KEY,
+              pedido_id TEXT DEFAULT '',
+              order_ids TEXT DEFAULT '[]',
+              status TEXT DEFAULT '',
+              stage TEXT DEFAULT '',
+              claim_type TEXT DEFAULT '',
+              reason_id TEXT DEFAULT '',
+              return_id TEXT DEFAULT '',
+              return_status TEXT DEFAULT '',
+              shipment_status TEXT DEFAULT '',
+              shipment_destination TEXT DEFAULT '',
+              seller_actions TEXT DEFAULT '[]',
+              bucket TEXT NOT NULL,
+              regra TEXT DEFAULT '',
+              last_updated TEXT DEFAULT '',
+              payload TEXT DEFAULT '{}',
+              active INTEGER DEFAULT 1,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(devolucoes)").fetchall()}
@@ -154,6 +247,14 @@ def init_database() -> None:
             "ml_taxa_venda": "REAL DEFAULT 0",
             "ml_custo_envio": "REAL DEFAULT 0",
             "ml_status_pagamento": "TEXT DEFAULT ''",
+            "ml_return_id": "TEXT DEFAULT ''",
+            "ml_return_subtype": "TEXT DEFAULT ''",
+            "ml_status_money": "TEXT DEFAULT ''",
+            "ml_refund_at": "TEXT DEFAULT ''",
+            "ml_seller_status": "TEXT DEFAULT ''",
+            "ml_seller_reason": "TEXT DEFAULT ''",
+            "ml_product_condition": "TEXT DEFAULT ''",
+            "ml_return_reviews": "TEXT DEFAULT '[]'",
         }
         for name, definition in extra_columns.items():
             if name not in columns:
@@ -172,11 +273,51 @@ def init_database() -> None:
         for name, definition in checklist_extra_columns.items():
             if name not in checklist_columns:
                 conn.execute(f"ALTER TABLE checklists ADD COLUMN {name} {definition}")
+        classification_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ml_claim_classifications)").fetchall()}
+        classification_extra_columns = {
+            "produto_nome": "TEXT DEFAULT ''",
+            "produto_imagem": "TEXT DEFAULT ''",
+            "valor_pago": "REAL DEFAULT 0",
+            "taxa_venda": "REAL DEFAULT 0",
+            "ml_tipo_logistica": "TEXT DEFAULT ''",
+            "motivo_label": "TEXT DEFAULT ''",
+            "pack_id": "TEXT DEFAULT ''",
+            "mandatory": "INTEGER DEFAULT 0",
+            "due_date": "TEXT DEFAULT ''",
+            "date_created": "TEXT DEFAULT ''",
+        }
+        for name, definition in classification_extra_columns.items():
+            if name not in classification_columns:
+                conn.execute(f"ALTER TABLE ml_claim_classifications ADD COLUMN {name} {definition}")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_devolucoes_ml_claim_id
             ON devolucoes(ml_claim_id)
             WHERE ml_claim_id IS NOT NULL AND ml_claim_id != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ml_raw_payloads_claim
+            ON ml_raw_payloads(claim_id, resource_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ml_sync_runs_tipo_status
+            ON ml_sync_runs(tipo, status, iniciado_em)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ml_trace_events_trace
+            ON ml_trace_events(trace_id, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ml_claim_classifications_bucket
+            ON ml_claim_classifications(active, bucket)
             """
         )
         total = conn.execute("SELECT COUNT(*) AS total FROM devolucoes").fetchone()["total"]
@@ -215,6 +356,17 @@ def require_login():
 
 def current_env() -> dict:
     return {**os.environ, **dotenv_values(ENV_PATH)}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(current_env().get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def ml_worker_count(name: str, default: int) -> int:
+    return max(1, min(env_int(name, default), 8))
 
 
 def set_env_values(updates: dict[str, str]) -> None:
@@ -406,8 +558,24 @@ def claim_available_actions(claim: dict) -> list[dict]:
 
 
 def has_return_review_action(claim: dict) -> bool:
-    review_actions = {"return_review_ok", "return_review_fail", "return_review_unified_ok", "return_review_unified_fail"}
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
     return any(action.get("action") in review_actions for action in claim_available_actions(claim))
+
+
+def has_seller_action(claim: dict, actions: set[str]) -> bool:
+    return bool(set(action_names(claim)).intersection(actions))
+
+
+def action_names(claim: dict) -> list[str]:
+    return sorted({str(action.get("action") or "") for action in claim_available_actions(claim) if action.get("action")})
+
+
+def claim_has_listed_seller_action(claim: dict) -> bool:
+    actions = set(action_names(claim))
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    if actions.intersection(review_actions):
+        return True
+    return claim.get("status") == "opened" and "send_message_to_mediator" in actions
 
 
 def review_due_date(claim: dict) -> str | None:
@@ -457,6 +625,139 @@ def ml_confirm_return_review_ok(claim_id: str | int) -> dict:
     raise RuntimeError(f"Nao foi possivel concluir a devolucao no Mercado Livre: {detail}")
 
 
+def ml_return_shipments(retorno: dict | None) -> list[dict]:
+    retorno = retorno or {}
+    shipments = retorno.get("shipments")
+    if isinstance(shipments, list) and shipments:
+        return [shipment or {} for shipment in shipments]
+    shipping = retorno.get("shipping")
+    if isinstance(shipping, dict) and shipping:
+        return [shipping]
+    shipment = retorno.get("shipment")
+    if isinstance(shipment, dict) and shipment:
+        return [shipment]
+    return [{}]
+
+
+def start_ml_sync_run(tipo: str, detalhes: dict | None = None) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO ml_sync_runs (tipo, status, iniciado_em, detalhes)
+            VALUES (?, 'running', ?, ?)
+            """,
+            [tipo, now_iso(), json_dumps(detalhes or {})],
+        )
+        return int(cur.lastrowid)
+
+
+def finish_ml_sync_run(
+    sync_run_id: int,
+    *,
+    status: str,
+    total_declarado: int = 0,
+    total_encontrado: int = 0,
+    total_processado: int = 0,
+    total_erros: int = 0,
+    detalhes: dict | None = None,
+) -> None:
+    with db() as conn:
+        conn.execute(
+            """
+            UPDATE ml_sync_runs
+            SET status = ?, finalizado_em = ?, total_declarado = ?, total_encontrado = ?,
+                total_processado = ?, total_erros = ?, detalhes = ?
+            WHERE id = ?
+            """,
+            [
+                status,
+                now_iso(),
+                int(total_declarado or 0),
+                int(total_encontrado or 0),
+                int(total_processado or 0),
+                int(total_erros or 0),
+                json_dumps(detalhes or {}),
+                sync_run_id,
+            ],
+        )
+
+
+def save_ml_raw_payload(sync_run_id: int | None, resource_type: str, resource_id: str | int | None, payload: dict, claim_id: str | int | None = "") -> None:
+    resource_id = str(resource_id or "")
+    if not resource_id:
+        return
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ml_raw_payloads (
+              sync_run_id, resource_type, resource_id, claim_id, payload, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(resource_type, resource_id) DO UPDATE SET
+              sync_run_id = excluded.sync_run_id,
+              claim_id = excluded.claim_id,
+              payload = excluded.payload,
+              captured_at = excluded.captured_at
+            """,
+            [sync_run_id, resource_type, resource_id, str(claim_id or ""), json_dumps(payload), now_iso()],
+        )
+
+
+def add_ml_trace_event(
+    trace_id: str | None,
+    sync_run_id: int | None,
+    step: str,
+    *,
+    status: str = "ok",
+    details: dict | None = None,
+    claim_id: str | int | None = "",
+    started_at: float | None = None,
+) -> None:
+    if not trace_id:
+        return
+    duration_ms = int((perf_counter() - started_at) * 1000) if started_at else 0
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ml_trace_events (
+              trace_id, sync_run_id, step, status, duration_ms, claim_id, details, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                trace_id,
+                sync_run_id,
+                step,
+                status,
+                duration_ms,
+                str(claim_id or ""),
+                json_dumps(details or {}),
+                now_iso(),
+            ],
+        )
+
+
+def ml_return_reviews(return_id: str | int | None, sync_run_id: int | None = None, claim_id: str | int | None = "") -> dict:
+    if not return_id:
+        return {"reviews": []}
+    try:
+        reviews = ml_get(f"/post-purchase/v1/returns/{return_id}/reviews")
+        save_ml_raw_payload(sync_run_id, "return_reviews", return_id, reviews, claim_id)
+        return reviews
+    except Exception:
+        return {"reviews": []}
+
+
+def add_ml_reconciliation_diff(sync_run_id: int, tipo: str, severidade: str, referencia: str, detalhe: str) -> None:
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ml_reconciliation_diffs (
+              sync_run_id, tipo, severidade, referencia, detalhe, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [sync_run_id, tipo, severidade, referencia, detalhe, now_iso()],
+        )
+
+
 def order_financials(order: dict | None) -> dict:
     order = order or {}
     payments = order.get("payments") or []
@@ -479,25 +780,30 @@ def order_financials(order: dict | None) -> dict:
     }
 
 
-def build_ml_devolucao(claim: dict) -> dict:
+def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
     claim_id = claim.get("id")
     resource_id = claim.get("resource_id")
     retorno = None
     order = None
+    save_ml_raw_payload(sync_run_id, "claim", claim_id, claim, claim_id)
     try:
         retorno = ml_get(f"/post-purchase/v2/claims/{claim_id}/returns")
+        save_ml_raw_payload(sync_run_id, "return", retorno.get("id") or claim_id, retorno, claim_id)
     except Exception:
         retorno = None
+    return_id = (retorno or {}).get("id")
+    reviews_payload = ml_return_reviews(return_id, sync_run_id, claim_id)
     if resource_id:
         try:
             order = ml_get(f"/orders/{resource_id}")
+            save_ml_raw_payload(sync_run_id, "order", order.get("id") or resource_id, order, claim_id)
         except Exception:
             order = None
 
     item = ((order or {}).get("order_items") or [{}])[0].get("item", {})
     buyer = (order or {}).get("buyer", {})
     buyer_name = " ".join([buyer.get("first_name") or "", buyer.get("last_name") or ""]).strip()
-    shipment = ((retorno or {}).get("shipments") or [(retorno or {}).get("shipment") or {}])[0]
+    shipment = ml_return_shipments(retorno)[0]
     destination = (shipment or {}).get("destination", {}).get("name", "")
     return_status = str((retorno or {}).get("status") or "").lower()
     date_base = (retorno or {}).get("last_updated") or (retorno or {}).get("date_created") or claim.get("date_created")
@@ -510,6 +816,7 @@ def build_ml_devolucao(claim: dict) -> dict:
     if item_id and not picture:
         try:
             ml_item = ml_get(f"/items/{item_id}")
+            save_ml_raw_payload(sync_run_id, "item", item_id, ml_item, claim_id)
             picture = ml_item.get("secure_thumbnail") or ml_item.get("thumbnail") or ""
             pictures = ml_item.get("pictures") or []
             if pictures:
@@ -575,6 +882,14 @@ def build_ml_devolucao(claim: dict) -> dict:
         "ml_status": claim.get("status") or "",
         "ml_stage": claim.get("stage") or "",
         "ml_return_status": (retorno or {}).get("status") or "",
+        "ml_return_id": str(return_id or ""),
+        "ml_return_subtype": (retorno or {}).get("subtype") or "",
+        "ml_status_money": (retorno or {}).get("status_money") or "",
+        "ml_refund_at": (retorno or {}).get("refund_at") or "",
+        "ml_seller_status": (retorno or {}).get("seller_status") or "",
+        "ml_seller_reason": (retorno or {}).get("seller_reason") or "",
+        "ml_product_condition": (retorno or {}).get("product_condition") or "",
+        "ml_return_reviews": json_dumps((reviews_payload or {}).get("reviews") or []),
         "ml_destino_devolucao": destination,
         "ml_tipo_logistica": "full_ml" if full_ml else "seller_address",
         "prazo_resolucao": prazo,
@@ -632,6 +947,14 @@ def build_devolucao_from_order(order: dict, pedido_id_override: str | None = Non
         "ml_status": order.get("status") or "",
         "ml_stage": "",
         "ml_return_status": "",
+        "ml_return_id": "",
+        "ml_return_subtype": "",
+        "ml_status_money": "",
+        "ml_refund_at": "",
+        "ml_seller_status": "",
+        "ml_seller_reason": "",
+        "ml_product_condition": "",
+        "ml_return_reviews": "[]",
         "ml_destino_devolucao": "full_ml" if full_ml else "seller_address",
         "ml_tipo_logistica": "full_ml" if full_ml else "organica",
         "prazo_resolucao": None if full_ml else now_iso(),
@@ -681,7 +1004,7 @@ def find_claim_by_tracking(identifier: str) -> dict:
             retorno = ml_get(f"/post-purchase/v2/claims/{claim.get('id')}/returns")
         except Exception:
             continue
-        shipment_items = (retorno or {}).get("shipments") or [(retorno or {}).get("shipment") or {}]
+        shipment_items = ml_return_shipments(retorno)
         for shipment in shipment_items:
             if lookup_matches(
                 identifier,
@@ -754,6 +1077,29 @@ def resumo_from_database() -> dict:
     return resumo_from_items(rows, "banco_sincronizado")
 
 
+def resumo_from_classification_cache() -> dict:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT bucket, COUNT(*) AS total
+            FROM ml_claim_classifications
+            WHERE active = 1
+            GROUP BY bucket
+            """
+        ).fetchall()
+    counts = {row["bucket"]: int(row["total"] or 0) for row in rows}
+    para_revisao = counts.get("para_revisao", 0)
+    para_retirar = counts.get("para_retirar", 0)
+    outros = counts.get("outros_problemas", 0)
+    return {
+        "para_revisao": para_revisao,
+        "para_retirar": para_retirar,
+        "outros_problemas": outros,
+        "total": para_revisao + para_retirar + outros,
+        "fonte": "cache_classificacao_ml",
+    }
+
+
 def claim_return_status(claim_id: int | str) -> str:
     for _ in range(2):
         try:
@@ -768,20 +1114,39 @@ def claim_return_info(claim_id: int | str) -> dict:
     for _ in range(2):
         try:
             retorno = ml_get(f"/post-purchase/v2/claims/{claim_id}/returns")
-            shipment = ((retorno or {}).get("shipments") or [(retorno or {}).get("shipment") or {}])[0]
+            shipment = ml_return_shipments(retorno)[0]
+            orders = retorno.get("orders") if isinstance(retorno, dict) else []
             return {
+                "return_id": str((retorno or {}).get("id") or ""),
                 "status": str((retorno or {}).get("status") or "").lower(),
                 "shipment_status": str((shipment or {}).get("status") or "").lower(),
+                "shipment_destination": str(((shipment or {}).get("destination") or {}).get("name") or "").lower(),
                 "date_created": (retorno or {}).get("date_created") or "",
+                "refund_at": str((retorno or {}).get("refund_at") or "").lower(),
+                "seller_status": str((retorno or {}).get("seller_status") or "").lower(),
+                "seller_reason": str((retorno or {}).get("seller_reason") or "").lower(),
+                "product_condition": str((retorno or {}).get("product_condition") or "").lower(),
+                "orders": orders if isinstance(orders, list) else [],
+                "related_entities": retorno.get("related_entities") if isinstance(retorno, dict) else [],
             }
         except Exception:
             continue
-    return {"status": "", "shipment_status": "", "date_created": ""}
+    return {
+        "return_id": "",
+        "status": "",
+        "shipment_status": "",
+        "shipment_destination": "",
+        "date_created": "",
+        "refund_at": "",
+        "seller_status": "",
+        "seller_reason": "",
+        "product_condition": "",
+        "orders": [],
+        "related_entities": [],
+    }
 
 
 def classify_ml_next_claim(claim: dict, return_info: dict | None = None, today_local=None) -> str | None:
-    if claim.get("status") != "opened":
-        return None
     today_local = today_local or datetime.now().date()
     return_info = return_info or claim_return_info(claim.get("id"))
     return_status = str(return_info.get("status") or "").lower()
@@ -792,10 +1157,14 @@ def classify_ml_next_claim(claim: dict, return_info: dict | None = None, today_l
     updated_today = updated_value[:10] == today_local.isoformat()
     review_action = has_return_review_action(claim)
 
-    if review_action or return_status in {"delivered", "received", "failed"} or reason in {"PDD9944", "PDD9968"}:
+    if review_action:
         claim["_next_kind"] = "revisao"
         claim["_review_due_date"] = review_due_date(claim) or updated_value
         return "revisao"
+    if claim.get("status") != "opened":
+        return None
+    if str(claim.get("type") or "").lower() == "mediations" or str(claim.get("stage") or "").lower() == "dispute":
+        return None
     if return_status == "label_generated" and reason == "PDD9967":
         claim["_next_kind"] = "retirar_correio"
         return "retirar_correio"
@@ -820,7 +1189,8 @@ def all_ml_claims(user_id: str, *, claim_type: str = "returns") -> list[dict]:
     claims: list[dict] = []
     seen_claims: set[str] = set()
     for status_filter in ("opened", "closed"):
-        max_offset = 1000 if status_filter == "opened" else 1200
+        pages = env_int("ML_SYNC_MAX_PAGES_OPENED", 10) if status_filter == "opened" else env_int("ML_SYNC_MAX_PAGES_CLOSED", 12)
+        max_offset = max(pages, 1) * 100
         for offset in range(0, max_offset, 100):
             data = ml_get(
                 "/post-purchase/v1/claims/search",
@@ -844,10 +1214,19 @@ def all_ml_claims(user_id: str, *, claim_type: str = "returns") -> list[dict]:
     return claims
 
 
-def ml_claims_search(user_id: str, status: str, *, claim_type: str = "returns", max_pages: int = 10) -> tuple[list[dict], int]:
+def ml_claims_search(
+    user_id: str,
+    status: str,
+    *,
+    claim_type: str = "returns",
+    max_pages: int = 10,
+    sync_run_id: int | None = None,
+    trace_id: str | None = None,
+) -> tuple[list[dict], int]:
     claims: list[dict] = []
     total = 0
     for page in range(max_pages):
+        page_started = perf_counter()
         offset = page * 100
         params = {
             "user_id": user_id,
@@ -861,6 +1240,22 @@ def ml_claims_search(user_id: str, status: str, *, claim_type: str = "returns", 
         total = int((data.get("paging") or {}).get("total") or total or 0)
         batch = data.get("data") or data.get("results") or []
         claims.extend(batch)
+        add_ml_trace_event(
+            trace_id,
+            sync_run_id,
+            "claims_search_page",
+            details={
+                "status_filter": status,
+                "type": claim_type,
+                "page": page + 1,
+                "offset": offset,
+                "limit": 100,
+                "batch": len(batch),
+                "total_declarado": total,
+                "acumulado": len(claims),
+            },
+            started_at=page_started,
+        )
         if len(batch) < 100 or len(claims) >= total:
             break
     return claims, total or len(claims)
@@ -886,7 +1281,7 @@ def post_sales_filters_from_ml(user_id: str) -> dict:
     operational_week_start = monday.isoformat() + "T16:00:00.000-00:00"
     return_info_by_claim: dict[str, dict] = {}
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=ml_worker_count("ML_SYNC_MANUAL_WORKERS", 4)) as executor:
         futures = {executor.submit(claim_return_info, claim.get("id")): claim for claim in opened}
         for future in as_completed(futures):
             claim = futures[future]
@@ -969,64 +1364,441 @@ def post_sales_filters_from_ml(user_id: str) -> dict:
     }
 
 
-def opened_claims_for_next_attendance(user_id: str) -> list[dict]:
-    claims, _ = ml_claims_search(user_id, "opened", max_pages=10)
+def ml_live_claims_for_queue(user_id: str, *, max_pages: int = 3) -> tuple[list[dict], dict]:
+    claims: list[dict] = []
+    seen: set[str] = set()
+    declared: dict[str, int] = {}
+    searches = (
+        ("returns", "opened", max_pages),
+        ("returns", "closed", env_int("ML_LIVE_QUEUE_CLOSED_PAGES", 1)),
+        ("mediations", "opened", max_pages),
+        ("mediations", "closed", env_int("ML_LIVE_QUEUE_CLOSED_PAGES", 1)),
+    )
+    for claim_type, status_filter, pages in searches:
+        batch, total = ml_claims_search(user_id, status_filter, claim_type=claim_type, max_pages=pages)
+        declared[f"{claim_type}_{status_filter}"] = total
+        for claim in batch:
+            if not claim_has_listed_seller_action(claim):
+                continue
+            claim_id = str(claim.get("id") or "")
+            if claim_id and claim_id not in seen:
+                seen.add(claim_id)
+                claims.append(claim)
+    return claims, declared
+
+
+def opened_claims_for_review_and_returns(user_id: str, sync_run_id: int | None = None, trace_id: str | None = None) -> tuple[list[dict], int]:
+    claims: list[dict] = []
+    seen: set[str] = set()
+    total = 0
+    searches = (
+        ("returns", "opened", env_int("ML_SYNC_MAX_PAGES_OPENED", 10)),
+        ("returns", "closed", env_int("ML_SYNC_MAX_PAGES_CLOSED_REVIEW", 2)),
+        ("mediations", "opened", env_int("ML_SYNC_MAX_PAGES_MEDIATIONS", 3)),
+        ("mediations", "closed", env_int("ML_SYNC_MAX_PAGES_CLOSED_REVIEW", 2)),
+    )
+    for claim_type, status_filter, max_pages in searches:
+        batch, declared = ml_claims_search(
+            user_id,
+            status_filter,
+            claim_type=claim_type,
+            max_pages=max_pages,
+            sync_run_id=sync_run_id,
+            trace_id=trace_id,
+        )
+        total += int(declared or 0)
+        for claim in batch:
+            claim_id = str(claim.get("id") or "")
+            if claim_id and claim_id not in seen:
+                seen.add(claim_id)
+                claims.append(claim)
+    return claims, total or len(claims)
+
+
+def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, str]:
+    actions = set(action_names(claim))
+    return_status = str(return_info.get("status") or "").lower()
+    shipment_status = str(return_info.get("shipment_status") or "").lower()
+    destination = str(return_info.get("shipment_destination") or "").lower()
+    reason = str(claim.get("reason_id") or "")
+
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    if actions.intersection(review_actions):
+        return "para_revisao", "seller_available_action:return_review"
+    if "send_message_to_mediator" in actions:
+        return "outros_problemas", "seller_available_action:send_message_to_mediator"
+    if str(claim.get("type") or "") == "mediations" or str(claim.get("stage") or "") == "dispute":
+        return "fora_da_fila", "mediation_without_return_review_action"
+    if return_status == "label_generated" and reason == "PDD9967":
+        return "para_retirar", "return_label_generated_with_pickup_reason"
+    if return_status in {"label_generated", "shipped", "in_return", "processing"}:
+        return "outros_problemas", f"return_in_progress:{return_status}:{shipment_status}:{destination}"
+    return "fora_da_fila", f"no_matching_queue_rule:{return_status}:{shipment_status}"
+
+
+def cached_claim_classification(claim_id: str | int, last_updated: str | None) -> dict | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM ml_claim_classifications WHERE claim_id = ? LIMIT 1",
+            [str(claim_id or "")],
+        ).fetchone()
+    payload = json.loads(row["payload"] or "{}") if row else {}
+    if (
+        not row
+        or row["last_updated"] != (last_updated or "")
+        or payload.get("classifier_version") != ML_CLASSIFIER_VERSION
+        or payload.get("enrichment_version") != ML_ENRICHMENT_VERSION
+    ):
+        return None
+    data = dict(row)
+    data["seller_actions"] = json.loads(data.get("seller_actions") or "[]")
+    data["order_ids"] = json.loads(data.get("order_ids") or "[]")
+    data["payload"] = payload
+    data["cache_hit"] = True
+    return data
+
+
+def save_claim_classification(item: dict) -> None:
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ml_claim_classifications (
+              claim_id, pedido_id, order_ids, status, stage, claim_type, reason_id,
+              return_id, return_status, shipment_status, shipment_destination,
+              seller_actions, bucket, regra, last_updated, payload, active, updated_at,
+              produto_nome, produto_imagem, valor_pago, taxa_venda, ml_tipo_logistica,
+              motivo_label, pack_id, mandatory, due_date, date_created
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(claim_id) DO UPDATE SET
+              pedido_id = excluded.pedido_id,
+              order_ids = excluded.order_ids,
+              status = excluded.status,
+              stage = excluded.stage,
+              claim_type = excluded.claim_type,
+              reason_id = excluded.reason_id,
+              return_id = excluded.return_id,
+              return_status = excluded.return_status,
+              shipment_status = excluded.shipment_status,
+              shipment_destination = excluded.shipment_destination,
+              seller_actions = excluded.seller_actions,
+              bucket = excluded.bucket,
+              regra = excluded.regra,
+              last_updated = excluded.last_updated,
+              payload = excluded.payload,
+              active = 1,
+              updated_at = excluded.updated_at,
+              produto_nome = excluded.produto_nome,
+              produto_imagem = excluded.produto_imagem,
+              valor_pago = excluded.valor_pago,
+              taxa_venda = excluded.taxa_venda,
+              ml_tipo_logistica = excluded.ml_tipo_logistica,
+              motivo_label = excluded.motivo_label,
+              pack_id = excluded.pack_id,
+              mandatory = excluded.mandatory,
+              due_date = excluded.due_date,
+              date_created = excluded.date_created
+            """
+            ,
+            [
+                str(item.get("claim_id") or ""),
+                str(item.get("pedido_id") or ""),
+                json_dumps(item.get("order_ids") or []),
+                str(item.get("status") or ""),
+                str(item.get("stage") or ""),
+                str(item.get("type") or ""),
+                str(item.get("reason_id") or ""),
+                str(item.get("return_id") or ""),
+                str(item.get("return_status") or ""),
+                str(item.get("shipment_status") or ""),
+                str(item.get("shipment_destination") or ""),
+                json_dumps(item.get("seller_actions") or []),
+                str(item.get("bucket") or "fora_da_fila"),
+                str(item.get("regra") or ""),
+                str(item.get("last_updated") or ""),
+                json_dumps(item),
+                now_iso(),
+                str(item.get("produto_nome") or ""),
+                str(item.get("produto_imagem") or ""),
+                float(item.get("valor_pago") or 0),
+                float(item.get("taxa_venda") or 0),
+                str(item.get("ml_tipo_logistica") or ""),
+                str(item.get("motivo_label") or ""),
+                str(item.get("pack_id") or ""),
+                int(item.get("mandatory") or 0),
+                str(item.get("due_date") or ""),
+                str(item.get("date_created") or ""),
+            ],
+        )
+
+
+def bucket_action_meta(detail: dict, bucket: str) -> dict:
+    actions = claim_available_actions(detail)
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail", "return_review_ok", "return_review_fail"}
+    target = None
+    if bucket == "para_revisao":
+        target = next((a for a in actions if a.get("action") in review_actions), None)
+    elif bucket == "outros_problemas":
+        target = next((a for a in actions if a.get("action") == "send_message_to_mediator"), None)
+    if not target:
+        target = next((a for a in actions if a.get("due_date")), None)
+    return {
+        "mandatory": int(bool(target and target.get("mandatory"))),
+        "due_date": str((target or {}).get("due_date") or ""),
+    }
+
+
+def order_visuals(order: dict | None, claim_id: str | int) -> dict:
+    order = order or {}
+    order_item = ((order.get("order_items") or []) + [{}])[0]
+    item = order_item.get("item") or {}
+    shipping = order.get("shipping") or {}
+    logistic_type = str(shipping.get("logistic_type") or "").lower()
+    order_tags = set(order.get("tags") or [])
+    full_ml = logistic_type == "fulfillment" or (bool(order.get("fulfilled")) and "d2c" not in order_tags)
+    picture = item.get("secure_thumbnail") or item.get("thumbnail") or ""
+    item_id = item.get("id")
+    if item_id and not picture:
+        try:
+            ml_item = ml_get(f"/items/{item_id}")
+            picture = ml_item.get("secure_thumbnail") or ml_item.get("thumbnail") or ""
+            pictures = ml_item.get("pictures") or []
+            if pictures:
+                picture = pictures[0].get("secure_url") or pictures[0].get("url") or picture
+        except Exception:
+            picture = ""
+    financials = order_financials(order)
+    return {
+        "produto_nome": item.get("title") or "",
+        "produto_imagem": picture or "",
+        "valor_pago": float(financials.get("ml_valor_pago") or 0),
+        "taxa_venda": float(financials.get("ml_taxa_venda") or 0),
+        "ml_tipo_logistica": "full_ml" if full_ml else "seller_address",
+        "pack_id": str(order.get("pack_id") or ""),
+    }
+
+
+def fetch_order_for_claim(claim_detail: dict, return_info: dict) -> dict | None:
+    resource_id = claim_detail.get("resource_id")
+    candidates: list[str] = []
+    if resource_id:
+        candidates.append(str(resource_id))
+    for order in return_info.get("orders") or []:
+        order_id = order.get("order_id")
+        if order_id:
+            candidates.append(str(order_id))
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return ml_get(f"/orders/{candidate}")
+        except Exception:
+            continue
+    return None
+
+
+def inspect_claim_for_queue(claim: dict, *, use_cache: bool = True) -> tuple[dict, bool]:
+    claim_id = str(claim.get("id") or "")
+    last_updated = str(claim.get("last_updated") or "")
+    if use_cache:
+        cached = cached_claim_classification(claim_id, last_updated)
+        if cached:
+            payload = dict(cached.get("payload") or {})
+            payload["cache_hit"] = True
+            return payload, True
+    detail = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+    return_info = claim_return_info(claim_id)
+    bucket, rule = classify_ml_live_queue_claim(detail, return_info)
+    orders = return_info.get("orders") or []
+    order_ids = [str(order.get("order_id")) for order in orders if order.get("order_id")]
+    order_payload = fetch_order_for_claim(detail, return_info)
+    visuals = order_visuals(order_payload, claim_id)
+    action_meta = bucket_action_meta(detail, bucket)
+    reason_id = detail.get("reason_id")
+    item = {
+        "claim_id": claim_id,
+        "pedido_id": str(detail.get("resource_id") or ""),
+        "order_ids": order_ids,
+        "status": detail.get("status"),
+        "stage": detail.get("stage"),
+        "type": detail.get("type"),
+        "reason_id": reason_id,
+        "return_id": return_info.get("return_id"),
+        "return_status": return_info.get("status"),
+        "shipment_status": return_info.get("shipment_status"),
+        "shipment_destination": return_info.get("shipment_destination"),
+        "seller_actions": action_names(detail),
+        "bucket": bucket,
+        "regra": rule,
+        "date_created": detail.get("date_created"),
+        "last_updated": detail.get("last_updated") or last_updated,
+        "cache_hit": False,
+        "classifier_version": ML_CLASSIFIER_VERSION,
+        "enrichment_version": ML_ENRICHMENT_VERSION,
+        "produto_nome": visuals["produto_nome"],
+        "produto_imagem": visuals["produto_imagem"],
+        "valor_pago": visuals["valor_pago"],
+        "taxa_venda": visuals["taxa_venda"],
+        "ml_tipo_logistica": visuals["ml_tipo_logistica"],
+        "pack_id": visuals["pack_id"],
+        "motivo_label": motivo_label(reason_id),
+        "mandatory": action_meta["mandatory"],
+        "due_date": action_meta["due_date"],
+    }
+    save_claim_classification(item)
+    return item, False
+
+
+def apply_ml_queue_window(rows: list[dict]) -> None:
+    for item in rows:
+        regra = item.get("regra", "")
+        if item["bucket"] == "fora_da_fila" and ":outside_recent_window" in regra:
+            item["bucket"] = "outros_problemas"
+            item["regra"] = regra.replace(":outside_recent_window", "")
+    outros_limit = env_int("ML_LIVE_QUEUE_OUTROS_LIMIT", 21)
+    if outros_limit <= 0:
+        return
+    outros = [item for item in rows if item["bucket"] == "outros_problemas"]
+    outros_ativos = {
+        item["claim_id"]
+        for item in sorted(outros, key=lambda item: item.get("last_updated") or "", reverse=True)[:outros_limit]
+    }
+    for item in rows:
+        if item["bucket"] == "outros_problemas" and item["claim_id"] not in outros_ativos:
+            item["bucket"] = "fora_da_fila"
+            item["regra"] = f"{item.get('regra', '')}:outside_recent_window"
+
+
+def ml_live_return_queue(user_id: str) -> dict:
+    started = perf_counter()
+    claims, declared = ml_live_claims_for_queue(user_id, max_pages=env_int("ML_LIVE_QUEUE_MAX_PAGES", 3))
+    rows: list[dict] = []
+    cache_hits = 0
+    cache_misses = 0
+
+    def inspect_claim(claim: dict) -> dict:
+        item, _ = inspect_claim_for_queue(claim)
+        return item
+
+    with ThreadPoolExecutor(max_workers=ml_worker_count("ML_LIVE_QUEUE_WORKERS", 4)) as executor:
+        futures = {executor.submit(inspect_claim, claim): claim for claim in claims}
+        for future in as_completed(futures):
+            try:
+                item = future.result()
+                rows.append(item)
+                if item.get("cache_hit"):
+                    cache_hits += 1
+                else:
+                    cache_misses += 1
+            except Exception as exc:
+                claim = futures[future]
+                rows.append(
+                    {
+                        "claim_id": str(claim.get("id") or ""),
+                        "pedido_id": str(claim.get("resource_id") or ""),
+                        "status": claim.get("status"),
+                        "stage": claim.get("stage"),
+                        "type": claim.get("type"),
+                        "reason_id": claim.get("reason_id"),
+                        "bucket": "erro",
+                        "regra": str(exc),
+                    }
+                )
+
+    bucket_order = {"para_revisao": 1, "para_retirar": 2, "outros_problemas": 3, "fora_da_fila": 4, "erro": 5}
+    rows.sort(key=lambda item: (bucket_order.get(item["bucket"], 9), item.get("last_updated") or ""), reverse=False)
+    apply_ml_queue_window(rows)
+    proximas = {
+        "para_revisao": sum(1 for item in rows if item["bucket"] == "para_revisao"),
+        "para_retirar": sum(1 for item in rows if item["bucket"] == "para_retirar"),
+        "outros_problemas": sum(1 for item in rows if item["bucket"] == "outros_problemas"),
+    }
+    proximas["total"] = proximas["para_revisao"] + proximas["para_retirar"] + proximas["outros_problemas"]
+    return {
+        "fonte": "mercado_livre_live_queue_v2",
+        "duracao_ms": int((perf_counter() - started) * 1000),
+        "declarados": declared,
+        "inspecionados": len(rows),
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "proximas": proximas,
+        "fora_da_fila": sum(1 for item in rows if item["bucket"] == "fora_da_fila"),
+        "erros": sum(1 for item in rows if item["bucket"] == "erro"),
+        "itens": rows,
+    }
+
+
+def opened_claims_for_next_attendance(user_id: str, sync_run_id: int | None = None, trace_id: str | None = None) -> tuple[list[dict], int]:
+    search_started = perf_counter()
+    claims, total = opened_claims_for_review_and_returns(user_id, sync_run_id, trace_id)
+    add_ml_trace_event(
+        trace_id,
+        sync_run_id,
+        "claims_search_total",
+        details={
+            "total_declarado": total,
+            "total_recebido": len(claims),
+            "max_pages_returns": env_int("ML_SYNC_MAX_PAGES_OPENED", 10),
+            "max_pages_mediations": env_int("ML_SYNC_MAX_PAGES_MEDIATIONS", 3),
+        },
+        started_at=search_started,
+    )
+    for claim in claims:
+        save_ml_raw_payload(sync_run_id, "claim", claim.get("id"), claim, claim.get("id"))
 
     def classify(claim: dict) -> tuple[int, str, dict] | None:
-        kind = classify_ml_next_claim(claim)
+        started = perf_counter()
+        detailed_claim = ml_get(f"/post-purchase/v1/claims/{claim.get('id')}")
+        return_info = claim_return_info(claim.get("id"))
+        kind = classify_ml_next_claim(detailed_claim, return_info)
+        add_ml_trace_event(
+            trace_id,
+            sync_run_id,
+            "claim_classified",
+            status="ok" if kind else "ignored",
+            claim_id=claim.get("id"),
+            details={
+                "pedido_id": detailed_claim.get("resource_id"),
+                "reason_id": detailed_claim.get("reason_id"),
+                "claim_status": detailed_claim.get("status"),
+                "stage": detailed_claim.get("stage"),
+                "type": detailed_claim.get("type"),
+                "return_status": return_info.get("status"),
+                "shipment_status": return_info.get("shipment_status"),
+                "shipment_destination": return_info.get("shipment_destination"),
+                "seller_status": return_info.get("seller_status"),
+                "seller_reason": return_info.get("seller_reason"),
+                "product_condition": return_info.get("product_condition"),
+                "seller_actions": action_names(detailed_claim),
+                "bucket": kind or "",
+            },
+            started_at=started,
+        )
         if not kind:
             return None
         priority = {"revisao": 1, "retirar_correio": 2, "outros_problemas": 3}[kind]
-        return (priority, kind, claim)
-
-        """
-        Classifica claims em 3 categorias SEM LIMITES:
-        1. REVISAO: Produto entregue, aguardando sua decisão
-        2. RETIRAR_CORREIO: Full ML com label, aguardando retirada
-        3. OUTROS_PROBLEMAS: Tudo que está "opened" mas não é revisão ou retirada
-        """
-        if claim.get("status") != "opened":
-            # Claims fechadas não sincronizam
-            return None
-
-        due_date = review_due_date(claim)
-        status = claim_return_status(claim.get("id"))
-        reason = claim.get("reason_id")
-
-        # CATEGORIA 1: PARA SUA REVISÃO
-        # Produto já foi entregue e aguarda sua ação
-        if due_date and status == "delivered":
-            claim["_next_kind"] = "revisao"
-            claim["_review_due_date"] = due_date
-            return (1, "revisao", claim)
-
-        # CATEGORIA 2: PARA RETIRAR NO CORREIO
-        # Full ML com label gerado (PDD9967 = retirada)
-        if status == "label_generated" and reason == "PDD9967":
-            claim["_next_kind"] = "retirar_correio"
-            return (2, "retirar_correio", claim)
-
-        # CATEGORIA 3: OUTROS PROBLEMAS
-        # Qualquer claim aberta que tem label (aguardando envio do comprador)
-        # OU sem label mas está em andamento
-        if status == "label_generated":
-            claim["_next_kind"] = "outros_problemas"
-            return (3, "outros_problemas", claim)
-
-        # Qualquer outra devolução aberta sem label
-        if status in {"shipped", "processing", "in_return"}:
-            claim["_next_kind"] = "outros_problemas"
-            return (3, "outros_problemas", claim)
-
-        return None
+        return (priority, kind, detailed_claim)
 
     classified: list[tuple[int, str, dict]] = []
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    classify_started = perf_counter()
+    with ThreadPoolExecutor(max_workers=ml_worker_count("ML_SYNC_MAX_WORKERS", 4)) as executor:
         futures = [executor.submit(classify, claim) for claim in claims]
         for future in as_completed(futures):
             item = future.result()
             if item:
                 classified.append(item)
+    add_ml_trace_event(
+        trace_id,
+        sync_run_id,
+        "classification_total",
+        details={
+            "claims_recebidas": len(claims),
+            "claims_classificadas": len(classified),
+            "claims_ignoradas": max(len(claims) - len(classified), 0),
+        },
+        started_at=classify_started,
+    )
 
     # Separar por categoria SEM LIMITES
     revisao_items = [item for item in classified if item[1] == "revisao"]
@@ -1043,7 +1815,69 @@ def opened_claims_for_next_attendance(user_id: str) -> list[dict]:
     retirar = [claim for _, _, claim in retirar_items]
     outros = [claim for _, _, claim in outros_items]
 
-    return revisao + retirar + outros
+    add_ml_trace_event(
+        trace_id,
+        sync_run_id,
+        "classification_buckets",
+        details={
+            "para_revisao": len(revisao),
+            "para_retirar": len(retirar),
+            "outros_problemas": len(outros),
+            "total_final": len(revisao) + len(retirar) + len(outros),
+        },
+    )
+
+    return revisao + retirar + outros, total
+
+
+def refresh_ml_classification_cache(user_id: str, sync_run_id: int | None = None, trace_id: str | None = None) -> dict:
+    started = perf_counter()
+    claims, declared = ml_live_claims_for_queue(user_id, max_pages=env_int("ML_LIVE_QUEUE_MAX_PAGES", 3))
+    active_ids: set[str] = set()
+    rows: list[dict] = []
+    cache_hits = 0
+    cache_misses = 0
+    errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=ml_worker_count("ML_LIVE_QUEUE_WORKERS", 4)) as executor:
+        futures = {executor.submit(inspect_claim_for_queue, claim): claim for claim in claims}
+        for future in as_completed(futures):
+            claim = futures[future]
+            try:
+                item, hit = future.result()
+                rows.append(item)
+                cache_hits += 1 if hit else 0
+                cache_misses += 0 if hit else 1
+            except Exception as exc:
+                errors.append(f"{claim.get('id')}: {exc}")
+
+    apply_ml_queue_window(rows)
+    for item in rows:
+        save_claim_classification(item)
+        if item.get("claim_id"):
+            active_ids.add(str(item["claim_id"]))
+
+    with db() as conn:
+        conn.execute("UPDATE ml_claim_classifications SET active = 0")
+        if active_ids:
+            placeholders = ",".join(["?"] * len(active_ids))
+            conn.execute(
+                f"UPDATE ml_claim_classifications SET active = 1 WHERE claim_id IN ({placeholders})",
+                sorted(active_ids),
+            )
+
+    resumo = resumo_from_classification_cache()
+    result = {
+        "duracao_ms": int((perf_counter() - started) * 1000),
+        "declarados": declared,
+        "inspecionados": len(rows),
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "erros": errors[:10],
+        "resumo": resumo,
+    }
+    add_ml_trace_event(trace_id, sync_run_id, "classification_cache_refresh", status="ok" if not errors else "partial", details=result, started_at=started)
+    return result
 
 
 def upsert_ml_devolucao(item: dict) -> str:
@@ -1080,13 +1914,21 @@ def upsert_ml_devolucao(item: dict) -> str:
         "ml_taxa_venda",
         "ml_custo_envio",
         "ml_status_pagamento",
+        "ml_return_id",
+        "ml_return_subtype",
+        "ml_status_money",
+        "ml_refund_at",
+        "ml_seller_status",
+        "ml_seller_reason",
+        "ml_product_condition",
+        "ml_return_reviews",
     ]
     item = {**item, "ultima_sincronizacao_ml": now_iso(), "ml_ativo": int(item.get("ml_ativo", 1))}
     with db() as conn:
         if item.get("ml_claim_id"):
             row = conn.execute(
-                "SELECT * FROM devolucoes WHERE ml_claim_id = ? OR (marketplace = 'Mercado Livre' AND pedido_id = ?) LIMIT 1",
-                [item["ml_claim_id"], item["pedido_id"]],
+                "SELECT * FROM devolucoes WHERE ml_claim_id = ? LIMIT 1",
+                [item["ml_claim_id"]],
             ).fetchone()
         else:
             row = conn.execute(
@@ -1123,8 +1965,8 @@ def existing_ml_devolucao(item: dict) -> sqlite3.Row | None:
     with db() as conn:
         if item.get("ml_claim_id"):
             return conn.execute(
-                "SELECT * FROM devolucoes WHERE ml_claim_id = ? OR (marketplace = 'Mercado Livre' AND pedido_id = ?) LIMIT 1",
-                [item["ml_claim_id"], item["pedido_id"]],
+                "SELECT * FROM devolucoes WHERE ml_claim_id = ? LIMIT 1",
+                [item["ml_claim_id"]],
             ).fetchone()
         return conn.execute(
             "SELECT * FROM devolucoes WHERE marketplace = 'Mercado Livre' AND pedido_id = ? LIMIT 1",
@@ -1332,20 +2174,59 @@ def api_importar_pedido():
 @app.get("/api/resumo-ml")
 def api_resumo_ml():
     require_login()
-    return jsonify(resumo_from_database())
+    return jsonify(resumo_from_classification_cache())
 
 
 @app.get("/api/devolucoes/filtros-ml")
 def api_filtros_ml():
+    require_login()
+    resumo = resumo_from_classification_cache()
+    return jsonify({"fonte": resumo["fonte"], "proximas": resumo})
+
+
+@app.get("/api/devolucoes/cards")
+def api_cards_por_bucket():
+    require_login()
+    bucket = request.args.get("bucket", "").strip()
+    allowed_buckets = {"para_revisao", "para_retirar", "outros_problemas"}
+    if bucket not in allowed_buckets:
+        return jsonify({"mensagem": f"Bucket invalido. Use um de: {sorted(allowed_buckets)}"}), 400
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT claim_id, pedido_id, pack_id, order_ids, bucket, regra,
+                   reason_id, motivo_label, produto_nome, produto_imagem,
+                   valor_pago, taxa_venda, ml_tipo_logistica,
+                   return_status, shipment_status, shipment_destination,
+                   mandatory, due_date, date_created, last_updated
+            FROM ml_claim_classifications
+            WHERE active = 1 AND bucket = ?
+            ORDER BY
+              CASE WHEN due_date IS NULL OR due_date = '' THEN 1 ELSE 0 END,
+              due_date ASC,
+              last_updated DESC
+            """,
+            [bucket],
+        ).fetchall()
+    cards = []
+    for row in rows:
+        data = dict(row)
+        data["order_ids"] = json.loads(data.get("order_ids") or "[]")
+        cards.append(data)
+    return jsonify({"bucket": bucket, "total": len(cards), "cards": cards})
+
+
+@app.get("/api/devolucoes/fila-ml-live")
+def api_fila_ml_live():
     require_login()
     try:
         env_values = current_env()
         user_id = env_values.get("ML_USER_ID", "")
         if not env_values.get("ML_CLIENT_ID") or not env_values.get("ML_CLIENT_SECRET") or not user_id:
             return jsonify({"mensagem": "Configure ML_CLIENT_ID, ML_CLIENT_SECRET e ML_USER_ID."}), 400
-        return jsonify(post_sales_filters_from_ml(user_id))
+        return jsonify(ml_live_return_queue(user_id))
     except Exception as exc:
-        return jsonify({"mensagem": "Nao foi possivel carregar os filtros do Mercado Livre", "erro": str(exc)}), 400
+        return jsonify({"mensagem": "Nao foi possivel calcular a fila ao vivo do Mercado Livre", "erro": str(exc)}), 400
 
 
 @app.get("/api/devolucoes/resumo-financeiro")
@@ -1367,63 +2248,177 @@ def api_resumo_financeiro():
     return jsonify(dict(row))
 
 
+@app.get("/api/devolucoes/sync-diagnostico")
+def api_sync_diagnostico():
+    require_login()
+    with db() as conn:
+        sync_runs = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT * FROM ml_sync_runs
+                ORDER BY id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+        ]
+        raw_counts = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT resource_type, COUNT(*) AS total
+                FROM ml_raw_payloads
+                GROUP BY resource_type
+                ORDER BY resource_type
+                """
+            ).fetchall()
+        ]
+        diffs = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT * FROM ml_reconciliation_diffs
+                ORDER BY id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+        ]
+    for run in sync_runs:
+        run["detalhes"] = json.loads(run.get("detalhes") or "{}")
+    return jsonify({"sync_runs": sync_runs, "raw_counts": raw_counts, "diffs": diffs})
+
+
+def trace_payload(trace_id: str) -> dict:
+    with db() as conn:
+        events = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM ml_trace_events
+                WHERE trace_id = ?
+                ORDER BY id
+                """,
+                [trace_id],
+            ).fetchall()
+        ]
+        sync_run = None
+        if events and events[0].get("sync_run_id"):
+            sync_run = conn.execute("SELECT * FROM ml_sync_runs WHERE id = ?", [events[0]["sync_run_id"]]).fetchone()
+    for event in events:
+        event["details"] = json.loads(event.get("details") or "{}")
+    run = dict(sync_run) if sync_run else None
+    if run:
+        run["detalhes"] = json.loads(run.get("detalhes") or "{}")
+    return {"trace_id": trace_id, "sync_run": run, "events": events}
+
+
+@app.get("/api/devolucoes/sync-trace/ultimo")
+def api_sync_trace_ultimo():
+    require_login()
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT trace_id
+            FROM ml_trace_events
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return jsonify({"mensagem": "Nenhum trace encontrado.", "trace_id": "", "events": []}), 404
+    return jsonify(trace_payload(row["trace_id"]))
+
+
+@app.get("/api/devolucoes/sync-trace/<trace_id>")
+def api_sync_trace(trace_id: str):
+    require_login()
+    payload = trace_payload(trace_id)
+    if not payload["events"]:
+        return jsonify({"mensagem": "Trace nao encontrado.", "trace_id": trace_id, "events": []}), 404
+    return jsonify(payload)
+
+
 @app.post("/api/devolucoes/sincronizar-ml")
 def api_sincronizar_ml():
     require_login()
+    sync_run_id = 0
+    trace_id = str(uuid4())
+    sync_started = perf_counter()
     try:
         env_values = current_env()
         user_id = env_values.get("ML_USER_ID", "")
         if not env_values.get("ML_CLIENT_ID") or not env_values.get("ML_CLIENT_SECRET") or not user_id:
             return jsonify({"mensagem": "Configure ML_CLIENT_ID, ML_CLIENT_SECRET e ML_USER_ID."}), 400
-        claims = opened_claims_for_next_attendance(user_id)
-        created = updated = 0
-        erros: list[str] = []
-        itens_processados: list[dict] = []
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(build_ml_devolucao, claim): claim for claim in claims}
-            for future in as_completed(futures):
-                try:
-                    item = future.result()
-                    kind = futures[future].get("_next_kind")
-                    item["ml_ativo"] = 1
-                    if kind == "retirar_correio":
-                        item["prioridade_prazo"] = "retirar_correio"
-                        item["requer_acao"] = 0
-                        item["acao_recomendada"] = "Devolucao para retirar no correio."
-                    elif kind == "revisao":
-                        item["status"] = "produto_recebido"
-                        item["prioridade_prazo"] = "hoje"
-                        item["requer_acao"] = 1
-                    elif kind == "outros_problemas":
-                        item["prioridade_prazo"] = "outros_problemas"
-                        item["requer_acao"] = 0
-                        item["acao_recomendada"] = "Devolucao aberta no Mercado Livre, mas fora da fila imediata de revisao."
-                    itens_processados.append(item)
-                except Exception as exc:
-                    erros.append(str(exc))
-
-        if itens_processados or not claims:
-            with db() as conn:
-                conn.execute("UPDATE devolucoes SET ml_ativo = 0 WHERE marketplace = 'Mercado Livre'")
-            for item in itens_processados:
-                action = upsert_ml_devolucao(item)
-                created += 1 if action == "created" else 0
-                updated += 1 if action == "updated" else 0
-        resumo = resumo_from_database()
-        resumo["fonte"] = "mercado_livre"
+        sync_run_id = start_ml_sync_run("classification_cache", {"user_id": user_id, "trace_id": trace_id})
+        add_ml_trace_event(
+            trace_id,
+            sync_run_id,
+            "sync_start",
+            details={
+                "tipo": "classification_cache",
+                "user_id": user_id,
+                "max_pages": env_int("ML_LIVE_QUEUE_MAX_PAGES", 3),
+                "closed_pages": env_int("ML_LIVE_QUEUE_CLOSED_PAGES", 1),
+                "workers": ml_worker_count("ML_LIVE_QUEUE_WORKERS", 4),
+            },
+        )
+        cache_result = refresh_ml_classification_cache(user_id, sync_run_id, trace_id)
+        resumo = cache_result["resumo"]
+        resumo["fonte"] = "mercado_livre_cache_classificacao"
+        add_ml_trace_event(
+            trace_id,
+            sync_run_id,
+            "summary_database",
+            details={
+                "total": resumo.get("total"),
+                "para_revisao": resumo.get("para_revisao"),
+                "para_retirar": resumo.get("para_retirar"),
+                "outros_problemas": resumo.get("outros_problemas"),
+            },
+        )
+        finish_ml_sync_run(
+            sync_run_id,
+            status="success" if not cache_result["erros"] else "partial",
+            total_declarado=sum(int(value or 0) for value in cache_result["declarados"].values()),
+            total_encontrado=cache_result["inspecionados"],
+            total_processado=cache_result["cache_misses"],
+            total_erros=len(cache_result["erros"]),
+            detalhes={"trace_id": trace_id, **cache_result},
+        )
+        add_ml_trace_event(
+            trace_id,
+            sync_run_id,
+            "sync_finish",
+            status="success" if not cache_result["erros"] else "partial",
+            details=cache_result,
+            started_at=sync_started,
+        )
 
         return jsonify(
             {
                 "mensagem": "Sincronizacao concluida",
-                "total": len(claims),
-                "criadas": created,
-                "atualizadas": updated,
-                "erros": erros[:5],
+                "sync_run_id": sync_run_id,
+                "trace_id": trace_id,
+                "total_declarado_ml": sum(int(value or 0) for value in cache_result["declarados"].values()),
+                "total": resumo["total"],
+                "criadas": 0,
+                "atualizadas": cache_result["cache_misses"],
+                "erros": cache_result["erros"],
                 "resumo": resumo,
             }
         )
     except Exception as exc:
+        if sync_run_id:
+            finish_ml_sync_run(sync_run_id, status="error", total_erros=1, detalhes={"erro": str(exc)})
+            add_ml_trace_event(
+                trace_id,
+                sync_run_id,
+                "sync_finish",
+                status="error",
+                details={"erro": str(exc)},
+                started_at=sync_started,
+            )
         return jsonify({"mensagem": "Nao foi possivel sincronizar o Mercado Livre", "erro": str(exc)}), 400
 
 
@@ -1431,26 +2426,33 @@ def api_sincronizar_ml():
 def api_sincronizar_ml_completo():
     """Sincroniza TODOS os dados do ML sem filtros (abertos E fechados)"""
     require_login()
+    sync_run_id = 0
     try:
         env_values = current_env()
         user_id = env_values.get("ML_USER_ID", "")
         if not env_values.get("ML_CLIENT_ID") or not env_values.get("ML_CLIENT_SECRET") or not user_id:
             return jsonify({"mensagem": "Configure ML_CLIENT_ID, ML_CLIENT_SECRET e ML_USER_ID."}), 400
 
+        sync_run_id = start_ml_sync_run("completo", {"user_id": user_id})
         claims = all_ml_claims(user_id)
+        for claim in claims:
+            save_ml_raw_payload(sync_run_id, "claim", claim.get("id"), claim, claim.get("id"))
         created = updated = 0
         erros: list[str] = []
         itens_processados: list[dict] = []
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = {executor.submit(build_ml_devolucao, claim): claim for claim in claims}
+        with ThreadPoolExecutor(max_workers=ml_worker_count("ML_SYNC_MANUAL_WORKERS", 4)) as executor:
+            futures = {executor.submit(build_ml_devolucao, claim, sync_run_id): claim for claim in claims}
             for future in as_completed(futures):
                 try:
                     item = future.result()
                     item["ml_ativo"] = 1
                     itens_processados.append(item)
                 except Exception as exc:
-                    erros.append(str(exc))
+                    claim = futures[future]
+                    erro = str(exc)
+                    erros.append(erro)
+                    add_ml_reconciliation_diff(sync_run_id, "processamento_claim_completo", "erro", str(claim.get("id") or ""), erro)
 
         if itens_processados:
             for item in itens_processados:
@@ -1460,10 +2462,20 @@ def api_sincronizar_ml_completo():
 
         resumo = resumo_from_database()
         resumo["fonte"] = "mercado_livre_completo"
+        finish_ml_sync_run(
+            sync_run_id,
+            status="success" if not erros else "partial",
+            total_declarado=len(claims),
+            total_encontrado=len(claims),
+            total_processado=len(itens_processados),
+            total_erros=len(erros),
+            detalhes={"criadas": created, "atualizadas": updated, "erros": erros[:3]},
+        )
 
         return jsonify(
             {
                 "mensagem": "Sincronizacao COMPLETA finalizada (todos os dados: abertos + fechados)",
+                "sync_run_id": sync_run_id,
                 "total_processados": len(claims),
                 "criadas": created,
                 "atualizadas": updated,
@@ -1473,6 +2485,8 @@ def api_sincronizar_ml_completo():
             }
         )
     except Exception as exc:
+        if sync_run_id:
+            finish_ml_sync_run(sync_run_id, status="error", total_erros=1, detalhes={"erro": str(exc)})
         return jsonify({"mensagem": "Nao foi possivel sincronizar o Mercado Livre completo", "erro": str(exc)}), 400
 
 

@@ -1,239 +1,140 @@
-# 📱 Resumo Rápido - Módulo de Devoluções
+# Resumo Rapido - Modulo de Devolucoes
 
-## O que é?
+Leitura: 3 min.
 
-Um subsistema integrado que **gerencia devoluções de produtos** em Mercado Livre, Shopee e outros canais de forma centralizada.
+## O que e?
 
----
+Painel interno NVS para operar devolucoes do **Mercado Livre**, replicando a aba "Proximas a serem atendidas" do painel pos-venda. Decisao por claim, registro de checklist/evidencias e geracao de mensagem de mediacao.
 
-## 🏗️ Arquitetura em 30 segundos
+## Arquitetura em 30 segundos
 
 ```
-┌─ Flask App (port 5000) ──────────┐
-│  seller-hub/app.py               │
-│                                  │
-│  → /devolucoes (rota)            │
-│  → Renderiza HTML                │
-│  → Mostra iframe com ferramenta  │
-└──────────────────────────────────┘
-         ↓
-┌─ Python Manager ─────────────────┐
-│  src/devolucoes_app.py           │
-│                                  │
-│  ✓ Inicia backend (npm start)    │
-│  ✓ Inicia frontend (npm run dev) │
-│  ✓ Monitora saúde (health checks)│
-│  ✓ Coleta logs                   │
-└──────────────────────────────────┘
-         ↙              ↘
-    [Node.js]      [React/Vite]
-   Backend API      Frontend UI
-   Port 3001        Port 5173
+┌─ Flask mono (porta 5010) ────────────────────────────────┐
+│  app.py                                                   │
+│    └─ rotas, classifier, cache, OAuth ML, uploads        │
+│  templates/devolucoes.html (UI inline + JS)              │
+│  static/styles.css                                        │
+│  data/devolucoes.sqlite                                   │
+│  uploads/                                                 │
+└───────────────────────────────────────────────────────────┘
+                       ↓ HTTP (OAuth Bearer)
+              api.mercadolibre.com (post-purchase)
 ```
 
----
+Nao tem Node, Express, React, Vite ou processo paralelo. Tudo num unico processo Python.
 
-## 🎯 Onde está cada coisa?
+## Estrutura
 
-| O quê | Onde | Arquivo |
-|-------|------|---------|
-| Gerenciador (Python) | seller-hub | `src/devolucoes_app.py` |
-| Interface HTML | seller-hub | `templates/devolucoes.html` |
-| Rotas Flask | seller-hub | `app.py` (linhas 133-160) |
-| Backend API | Fora | `projeto-devolucoes/backend/` |
-| UI React | Fora | `projeto-devolucoes/frontend/` |
+| O que | Onde |
+|---|---|
+| Backend + UI + classifier | `app.py` |
+| Template + JS | `templates/devolucoes.html` |
+| CSS | `static/styles.css` |
+| Banco | `data/devolucoes.sqlite` |
+| Testes | `tests/test_ml_contract.py` |
 
----
+## Como rodar
 
-## 🚀 Como começar a trabalhar
-
-### 1️⃣ Teste local
 ```bash
-python app.py
-# Acesse http://127.0.0.1:5000/login
-# PIN: 1234
-# Clique: Gestão de Devoluções
+cd "/Users/julio/Documents/Antigra/warehouse-picker v2/Devoluçao"
+venv/bin/python app.py
+# abrir http://127.0.0.1:5010
+# PIN = $PIN_MERCADO_LIVRE no .env (default 1234)
 ```
 
-### 2️⃣ Melhorar Frontend
-```bash
-cd projeto-devolucoes/frontend
-code .  # Abrir VSCode
-
-# Edite arquivos em src/
-# Salve e recarregue navegador (hot reload automático)
-```
-
-### 3️⃣ Melhorar Backend
-```bash
-cd projeto-devolucoes/backend
-code .  # Abrir VSCode
-
-# Edite arquivos em src/routes/
-# Pare e reinicie: npm start
-```
-
----
-
-## 📊 O que você VÊ quando acessa /devolucoes
+## O que voce ve em `/devolucoes`
 
 ```
 ╔════════════════════════════════════════════════════╗
-║ 🔄 Gestão de Devoluções                          ║
-║ Multiplataforma                                    ║
-║ Mercado Livre, Shopee e demais canais             ║
+║ ENTRADA DE DEVOLUCAO              [Atualizar ML]   ║
+║ [Pedido, pacote ou rastreio]      [Buscar venda]   ║
 ╠════════════════════════════════════════════════════╣
-║                                                    ║
-║ [Backend: ✅ OK]  [Frontend: ✅ OK]               ║
-║                                                    ║
-║ [Autorizar ML] [Abrir ferramenta] [Parar]        ║
-║                                                    ║
+║ Proximas a serem atendidas                 23      ║
+║   Para sua revisao                          2      ║
+║   Para retirar no correio                   0      ║
+║   Outros problemas                         21      ║
 ╠════════════════════════════════════════════════════╣
-║  ┌─ FERRAMENTA ──────────────────────────────────┐║
-║  │ (iframe mostrando React app)                  │║
-║  │                                               │║
-║  │ Devoluções pendentes:                         │║
-║  │ ┌─ Produto: Pneu traseiro                    ││
-║  │ │ Motivo: Chegou furado                       ││
-║  │ │ Cliente: João da Silva                      ││
-║  │ │ [✅ Aceitar] [❌ Rejeitar]                 ││
-║  │ │                                            ││
-║  │ ├─ Produto: Correia                         ││
-║  │ │ Motivo: Não encaixa                        ││
-║  │ │ Cliente: Maria Santos                      ││
-║  │ │ [✅ Aceitar] [❌ Rejeitar]                 ││
-║  │ └─                                            ││
-║  │                                               │║
-║  └───────────────────────────────────────────────┘║
-║                                                    ║
-╠════════════════════════════════════════════════════╣
-║ Logs:                                              ║
-║ backend: iniciado                                 ║
-║ backend: port 3001 listening                      ║
-║ frontend: ✅ built successfully                  ║
+║ PENDENCIAS                                         ║
+║ Em andamento (checklists iniciados) [Visualizar]   ║
 ╚════════════════════════════════════════════════════╝
 ```
 
----
+Click em um bucket abre modal flutuante com os cards (produto, valor, motivo, imagem). Click em **Abrir fluxo** num card abre o detalhe completo (chegada, checklist, evidencias, contestacao, historico) no mesmo modal.
 
-## 🔄 Fluxo de uma Devolução
+## Fluxo de uma devolucao
 
 ```
-1. Cliente solicita devolução no Mercado Livre/Shopee
+1. Cliente solicita devolucao no ML
    ↓
-2. Backend sincroniza (GET /devolutions)
+2. ML coloca claim em Proximas a serem atendidas
    ↓
-3. Frontend mostra na lista
+3. Usuario clica Atualizar ML no painel local
+   ↓ POST /api/devolucoes/sincronizar-ml
+4. Backend repopula cache ml_claim_classifications
    ↓
-4. Usuário clica "Aceitar"
+5. Cards exibem numeros que batem com ML
    ↓
-5. POST /api/devolutions/:id/accept
+6. Usuario clica no bucket "Para sua revisao"
+   ↓ GET /api/devolucoes/cards?bucket=para_revisao
+7. Modal mostra cards do bucket
    ↓
-6. Backend atualiza BD
-   ↓
-7. Backend atualiza no Mercado Livre/Shopee (API)
-   ↓
-8. Status muda de "Pendente" para "Aceita"
+8. Usuario clica Abrir fluxo num card
+   ↓ POST /api/pedidos/importar
+9. Modal troca para tela de detalhe (chegada, checklist, etc)
+   ↓ POST /api/devolucoes/{id}/chegada
+10. Decisao registrada local + ML (quando "esperado")
 ```
 
----
+## Classificacao (`actions-v3`)
 
-## 💻 Stack Tecnológico
+A regra olha `players[].available_actions[].action` no detalhe do claim:
 
-| Camada | Tecnologia | Port |
-|--------|-----------|------|
-| Interface Web | Flask | 5000 |
-| Manager | Python + subprocess | - |
-| Backend API | Node.js + Express | 3001 |
-| Frontend UI | React + Vite | 5173 |
+| Bucket | Acao gatilho |
+|---|---|
+| `para_revisao` | `return_review_unified_ok` / `return_review_unified_fail` |
+| `outros_problemas` | `send_message_to_mediator` |
+| `para_retirar` | `return_status=label_generated` + `reason_id=PDD9967` |
 
----
-
-## 🎯 Tarefas Típicas
-
-### ✏️ Melhorar UI
-```bash
-# Arquivo: projeto-devolucoes/frontend/src/components/DevolutionsList.jsx
-# Mude cor, adicione coluna, mude layout
-# Salve → Recarregue browser (hot reload)
-```
-
-### 🔌 Adicionar endpoint
-```bash
-# Arquivo: projeto-devolucoes/backend/src/routes/stats.js
-# Crie novo arquivo com:
-# router.get('/devolutions', async (req, res) => { ... })
-# Registre em src/index.js
-# Restart: npm start
-```
-
-### 🐛 Depurar erro
-```bash
-# Abra DevTools (F12)
-# Console → veja erros
-# Network → veja requests/responses
-# Procure em código (ctrl+shift+f)
-```
-
----
-
-## 🛑 Problemas Rápidos
-
-**Botão não funciona?**
-- Abra DevTools (F12) → Console
-- Procure erro vermelho
-- Procure função no código (ctrl+shift+f)
-
-**Backend respondendo mas Frontend não?**
-- Espere 5-10s (Vite compilando)
-- Recarregue página
-- Procure erro em Logs da página
-
-**Mudança no código não aparece?**
-- Frontend: salve arquivo, recarregue browser
-- Backend: pare (ctrl+c) e restart (`npm start`)
-
----
-
-## 📖 Documentos de Referência
-
-| Documento | Para quem | Lê em |
-|-----------|----------|-------|
-| `ENTENDER_DEVOLUCOES.md` | Entender a arquitetura | 20 min |
-| `TRABALHAR_DEVOLUCOES.md` | Trabalhar no código | 30 min |
-| `DEVOLUCOES_RESUMO_RAPIDO.md` | Refer rápido | 3 min |
-
----
-
-## ✅ Checklist para começar
-
-- [ ] Node.js instalado
-- [ ] Seller Hub rodando
-- [ ] Conseguir acessar /devolucoes
-- [ ] Backend + Frontend iniciando
-- [ ] VSCode aberto na pasta correta
-- [ ] Ler `TRABALHAR_DEVOLUCOES.md` (Cenário 1)
-
----
-
-## 🚀 Primeiro Teste
+## Comandos rapidos
 
 ```bash
-# 1. Inicia Seller Hub
-python app.py
+# rodar
+APP_HOST=127.0.0.1 APP_PORT=5010 venv/bin/python app.py
 
-# 2. Acessa no browser
-http://127.0.0.1:5000/login
-# PIN: 1234
+# testar
+venv/bin/python -m unittest discover -s tests -v
 
-# 3. Clica em Gestão de Devoluções
-# 4. Clica em "Abrir ferramenta"
-# 5. Espera 5-10s
-# 6. Ve interface carregando
+# inspecionar buckets atuais
+venv/bin/python -c "from app import db
+with db() as c:
+    for r in c.execute('SELECT bucket, COUNT(*) FROM ml_claim_classifications WHERE active=1 GROUP BY bucket'):
+        print(r[0], r[1])"
+
+# forcar refresh do cache (equivale ao botao)
+venv/bin/python -c "from app import refresh_ml_classification_cache, current_env, init_database
+init_database()
+print(refresh_ml_classification_cache(current_env().get('ML_USER_ID')))"
 ```
 
-Pronto! Você está testando o módulo de devoluções! 🎉
+## Problemas comuns
 
----
+**Card mostra numero diferente do ML**
+→ click em "Atualizar ML". Se persistir, ver `app.py` (`apply_ml_queue_window` ou regra do classifier).
 
-**Próximo passo?** Leia `TRABALHAR_DEVOLUCOES.md` para aprender como fazer mudanças!
+**F5 mostra numeros distorcidos**
+→ ja corrigido. `carregarTudo` chama `carregarResumoML` no boot. Se voltar, conferir `templates/devolucoes.html` linha `carregarTudo`.
+
+**Click em "Abrir fluxo" parece voltar pra tela inicial**
+→ ja corrigido. `abrirDetalhe(id, "modal")` renderiza no modal. Se voltar, conferir CSS `.center-workspace .meli-detail { display: none; }`.
+
+**Erro 500 ao clicar bucket**
+→ provavel schema desatualizado. Reiniciar Flask roda `init_database` que faz `ALTER TABLE` condicional.
+
+## Referencias internas
+
+| Doc | Para que serve |
+|---|---|
+| `HANDOFF_CLAUDE.md` | Estado completo + endpoints + pendencias |
+| `ENTENDER_DEVOLUCOES.md` | Arquitetura detalhada + fluxo de dados |
+| `TRABALHAR_DEVOLUCOES.md` | Guia de tarefas comuns |
+| `DEVOLUCOES_DIAGRAMA.txt` | Diagrama ASCII completo |

@@ -1439,10 +1439,18 @@ body.meli-page {
   font-size: 13px;
 }
 
-.order-entry-panel form {
+.order-entry-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.order-entry-actions form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+  width: 100%;
 }
 
 .order-entry-panel input {
@@ -1456,6 +1464,17 @@ body.meli-page {
   height: 44px;
   background: #3483fa;
   border-radius: 8px;
+}
+
+.order-entry-actions .update-ml-button {
+  background: #0f766e;
+  color: #fff;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+  white-space: nowrap;
 }
 
 .logistics-summary {
@@ -2038,6 +2057,7 @@ body.meli-page {
 
   .urgency-board,
   .order-entry-panel,
+  .order-entry-actions,
   .logistics-summary,
   .return-card,
   .review-steps,
@@ -2055,6 +2075,10 @@ body.meli-page {
 
   .case-action button:not(.more-button) {
     width: 100%;
+  }
+
+  .order-entry-actions form {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2851,6 +2875,7 @@ body.meli-page {
 
 @media (max-width: 980px) {
   .order-entry-panel,
+  .order-entry-actions,
   .logistics-summary,
   .return-card,
   .process-strip {

@@ -1,585 +1,279 @@
-# 🛠️ Guia Prático - Trabalhando com Devoluções
+# Trabalhar no Modulo de Devolucoes
 
-## 🎯 Objetivos Comuns
+Leitura: 30 min. Foco em tarefas concretas: rodar, debugar, alterar codigo.
 
-### 1. Testar o módulo localmente
-### 2. Melhorar a interface ou backend
-### 3. Adicionar novos endpoints
-### 4. Depurar problemas
-
----
-
-## 📍 Estrutura de Arquivos - Onde está o quê?
-
-```
-seller-hub/                          ← Você está aqui
-├── src/devolucoes_app.py            ← GERENCIADOR (Python)
-├── templates/devolucoes.html        ← INTERFACE (HTML/JS)
-├── app.py                           ← ROTAS FLASK
-│
-projeto-devolucoes/                  ← PROJETO SEPARADO
-├── backend/                         ← API Node.js
-│   ├── src/index.js                 ← Express server
-│   ├── package.json
-│   └── ...
-│
-└── frontend/                        ← UI React
-    ├── src/App.jsx
-    ├── vite.config.js
-    ├── package.json
-    └── ...
-```
-
----
-
-## 🚀 Cenário 1: Executar Localmente para Testar
-
-### Passo 1: Verificar dependências
+## Setup
 
 ```bash
-# Ter Node.js instalado
-node --version          # Deve ser v16+
-npm --version           # Deve ser v8+
-
-# Python rodando o Seller Hub
-python app.py           # Começa a rodar em http://127.0.0.1:5000
+cd "/Users/julio/Documents/Antigra/warehouse-picker v2/Devoluçao"
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env  # editar tokens ML
 ```
 
-### Passo 2: Acessar a página de devoluções
+`.env` precisa ter `ML_CLIENT_ID`, `ML_CLIENT_SECRET`, `ML_USER_ID`, `ML_ACCESS_TOKEN` ou `ML_REFRESH_TOKEN`. Sem isso, sync ML falha.
 
-```
-1. Abra http://127.0.0.1:5000/login
-2. Digite o PIN (padrão: 1234 ou valor em .env PIN_MERCADO_LIVRE)
-3. Clique em "Gestão de Devoluções"
-4. Clique em "Abrir ferramenta"
-```
-
-### Passo 3: Observar o que acontece
-
-```
-Você deve ver:
-✅ Backend: OK (verde)  
-✅ Frontend: OK (verde, após 3-5s)
-```
-
-Se algum virar vermelho, procure **"Logs"** na página.
-
-### Passo 4: Testar a funcionalidade
-
-```
-- Liste devoluções
-- Aceite uma
-- Rejeite outra
-- Verifique se status muda no Mercado Livre/Shopee
-```
-
----
-
-## 🎨 Cenário 2: Melhorar a Interface (Frontend)
-
-### Problema: Botão "Aceitar devolução" está confuso
-
-### Passo 1: Localizar o arquivo
+## Rodar
 
 ```bash
-cd C:\Users\mansa\OneDrive\Área de Trabalho\projeto-devolucoes\frontend\src
-
-# Encontrar onde o botão é definido
-findstr /r "Aceitar" components/*.jsx
-# ou
-grep -r "Accept" components/
+APP_HOST=127.0.0.1 APP_PORT=5010 venv/bin/python app.py
+# acessar http://127.0.0.1:5010
+# PIN do .env (default 1234)
 ```
 
-Típico resultado: `components/DevolutionDetail.jsx`
-
-### Passo 2: Abrir no editor
+Em outro terminal, monitorar logs:
 
 ```bash
-code .  # Abre VSCode na pasta frontend
-# Arquivo: src/components/DevolutionDetail.jsx
+tail -f /tmp/devolucao_flask.log   # se rodou em background
 ```
 
-### Passo 3: Fazer mudança
-
-**Antes**:
-```jsx
-<button onClick={handleAccept}>Aceitar</button>
-```
-
-**Depois**:
-```jsx
-<button className="button primary" onClick={handleAccept}>
-  ✅ Aceitar Devolução
-</button>
-```
-
-### Passo 4: Testar a mudança
+## Testar
 
 ```bash
-# O Vite faz hot-reload automático
-# Só salve o arquivo e recarregue o navegador
-# Não precisa reiniciar nada!
+venv/bin/python -m py_compile app.py
+venv/bin/python -m unittest discover -s tests -v
 ```
 
-A mudança aparece em tempo real no iframe.
+Tudo deve passar antes de qualquer commit.
 
-### Passo 5: Commit
+## Cenarios Comuns
 
-```bash
-cd projeto-devolucoes
-git add .
-git commit -m "feat: melhorar texto botão aceitar devolução"
-git push
+### 1. Mudar regra do classifier
+
+Arquivo: `app.py`
+Funcao: `classify_ml_live_queue_claim(claim, return_info)`
+
+```python
+def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, str]:
+    actions = set(action_names(claim))
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    if actions.intersection(review_actions):
+        return "para_revisao", "seller_available_action:return_review"
+    ...
 ```
 
----
+**Apos qualquer mudanca:**
 
-## 🔌 Cenário 3: Adicionar Novo Endpoint no Backend
+1. Bumpa `ML_CLASSIFIER_VERSION` (ex: `"actions-v3"` -> `"actions-v4"`)
+2. Roda testes: `venv/bin/python -m unittest discover -s tests -v`
+3. Reinicia Flask
+4. Clica Atualizar ML (cache sera invalidado e repopulado)
 
-### Problema: Preciso de um endpoint que retorna estatísticas de devoluções
+### 2. Adicionar nova coluna ao cache
 
-### Passo 1: Abrir backend
+Arquivo: `app.py`
+Funcao: `init_database()` + `save_claim_classification()` + `inspect_claim_for_queue()`
 
-```bash
-cd C:\Users\mansa\OneDrive\Área de Trabalho\projeto-devolucoes\backend
-code .
-```
+Passos:
 
-### Passo 2: Criar novo arquivo de rota
+1. Em `init_database`, adicionar ao dict `classification_extra_columns`:
 
-**Arquivo**: `src/routes/stats.js`
-
-```javascript
-const express = require('express');
-const router = express.Router();
-
-// GET /api/stats/devolutions
-// Retorna: total, aceitas, rejeitadas, em_processo
-router.get('/devolutions', async (req, res) => {
-  try {
-    // Aqui você consulta o BD ou chama a API ML/Shopee
-    const stats = {
-      total: 42,
-      accepted: 28,
-      rejected: 10,
-      pending: 4,
-      last_updated: new Date().toISOString()
-    };
-    res.json(stats);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-module.exports = router;
-```
-
-### Passo 3: Registrar a rota no servidor
-
-**Arquivo**: `src/index.js`
-
-```javascript
-const express = require('express');
-const statsRouter = require('./routes/stats');
-
-const app = express();
-
-// Registrar rota
-app.use('/api/stats', statsRouter);
-
-// ... resto do código
-```
-
-### Passo 4: Testar o endpoint
-
-```bash
-# Abra browser ou use curl/Postman
-curl http://127.0.0.1:3001/api/stats/devolutions
-
-# Resposta esperada:
-# {
-#   "total": 42,
-#   "accepted": 28,
-#   "rejected": 10,
-#   "pending": 4,
-#   "last_updated": "2025-01-20T10:30:00.000Z"
-# }
-```
-
-### Passo 5: Usar no Frontend
-
-**Arquivo**: `src/components/StatsPanel.jsx`
-
-```jsx
-import { useEffect, useState } from 'react';
-
-export function StatsPanel() {
-  const [stats, setStats] = useState(null);
-
-  useEffect(() => {
-    fetch('http://127.0.0.1:3001/api/stats/devolutions')
-      .then(r => r.json())
-      .then(setStats);
-  }, []);
-
-  if (!stats) return <div>Carregando...</div>;
-
-  return (
-    <div className="stats">
-      <div>Total: {stats.total}</div>
-      <div>Aceitas: {stats.accepted}</div>
-      <div>Rejeitadas: {stats.rejected}</div>
-      <div>Pendentes: {stats.pending}</div>
-    </div>
-  );
+```python
+classification_extra_columns = {
+    ...
+    "nova_coluna": "TEXT DEFAULT ''",
 }
 ```
 
----
+2. Em `save_claim_classification`, adicionar ao INSERT + ON CONFLICT UPDATE + lista de parametros.
 
-## 🐛 Cenário 4: Depurar Problema
+3. Em `inspect_claim_for_queue`, popular `item["nova_coluna"]`.
 
-### Problema: Backend respondendo, mas frontend não carrega
+4. Bumpa `ML_ENRICHMENT_VERSION` (ex: `"enrich-v1"` -> `"enrich-v2"`).
 
-### Passo 1: Verificar logs Python
+5. Restart + Atualizar ML.
 
-Volte para a página de devoluções no Seller Hub.
+### 3. Adicionar novo bucket
 
-Scroll down para **"Logs"**:
+Se quiser separar um novo grupo (ex: "aguardando_envio"):
 
-```
-backend: iniciado
-backend: port 3001 listening
-backend: database connected
-frontend: iniciado
-frontend: VITE v5.0.0 building...
-frontend: ⚠️  warnings found
-frontend: ❌ Could not resolve 'react-router-dom'
-```
+1. Em `classify_ml_live_queue_claim`, adicionar branch que retorna `("aguardando_envio", "regra...")`.
+2. Em `api_cards_por_bucket`, adicionar ao set `allowed_buckets`.
+3. Em `templates/devolucoes.html`, adicionar `<button class="summary-item" data-bucket="aguardando_envio">`.
+4. Em `resumo_from_classification_cache`, expor a contagem.
+5. Em `apply_ml_queue_window`, decidir se o novo bucket tambem tem janela.
+6. Bumpa `ML_CLASSIFIER_VERSION`.
+7. Restart + Atualizar ML.
 
-**Problema**: `react-router-dom` não está instalado.
+### 4. Debugar discrepancia com painel ML
 
-### Passo 2: Resolver o problema
+Passo a passo:
 
 ```bash
-cd projeto-devolucoes/frontend
+# 1. ver contagem por bucket
+venv/bin/python -c "from app import db
+with db() as c:
+    for r in c.execute('SELECT bucket, COUNT(*) FROM ml_claim_classifications WHERE active=1 GROUP BY bucket'):
+        print(r[0], r[1])"
 
-# Instalar dependência faltante
-npm install react-router-dom
+# 2. ver claims classificados como fora_da_fila por regra
+venv/bin/python -c "from app import db
+with db() as c:
+    for r in c.execute(\"SELECT regra, COUNT(*) FROM ml_claim_classifications WHERE active=1 AND bucket='fora_da_fila' GROUP BY regra\"):
+        print(r[0], r[1])"
 
-# Ou se arquivo package.json.lock está corrompido:
-rm package-lock.json
-npm install
+# 3. ver claims com mediator que ficaram fora (suspeitos)
+venv/bin/python -c "from app import db
+with db() as c:
+    for r in c.execute(\"SELECT claim_id, status, stage, regra FROM ml_claim_classifications WHERE active=1 AND seller_actions LIKE '%mediator%' AND bucket='fora_da_fila'\"):
+        print(dict(r))"
+
+# 4. inspecionar trace do ultimo refresh
+venv/bin/python -c "from app import app, PIN_MERCADO_LIVRE
+import json
+with app.test_client() as c:
+    c.post('/login', data={'pin': PIN_MERCADO_LIVRE})
+    data = c.get('/api/devolucoes/sync-trace/ultimo').get_json()
+    print(json.dumps(data, ensure_ascii=False, indent=2)[:3000])"
 ```
 
-### Passo 3: Reiniciar no browser
-
-Clique "Parar" → "Abrir ferramenta" novamente.
-
-Os logs devem mostrar que funcionou:
-
-```
-frontend: ✅ built successfully
-frontend: Local:   http://127.0.0.1:5173/devolucoes-app/
-```
-
-### Passo 4: Verificar no navegador
-
-```
-Developer Tools (F12) → Console
-```
-
-Se houver erros vermelhos, procure por:
-- `Cannot find module`
-- `TypeError`
-- `SyntaxError`
-
-### Passo 5: Procurar solução
+### 5. Forcar refresh do cache sem usar a UI
 
 ```bash
-# Se é erro de dependência:
-npm install <nome-do-pacote>
-
-# Se é erro de código:
-# Abra arquivo, procure a linha, corrija
-# Salve, Vite faz hot reload
+venv/bin/python - <<'PY'
+from app import refresh_ml_classification_cache, current_env, init_database
+init_database()
+result = refresh_ml_classification_cache(current_env().get("ML_USER_ID"))
+print("declarados:", result["declarados"])
+print("inspecionados:", result["inspecionados"])
+print("cache_hits:", result["cache_hits"], "misses:", result["cache_misses"])
+print("resumo:", result["resumo"])
+print("erros:", result["erros"])
+PY
 ```
 
----
-
-## 🔍 Cenário 5: Entender o Fluxo de uma Devolução
-
-### "Quero saber exatamente o que acontece quando clico 'Aceitar devolução'"
-
-### Passo 1: Abrir DevTools (F12)
-
-```
-Network Tab
-```
-
-Clique "Aceitar devolução" e observe:
-
-```
-POST /api/devolutions/123/accept
-
-Request:
-  - Headers: Authorization, Content-Type
-  - Body: { decision: 'accepted', reason: 'Item danificado' }
-
-Response:
-  - Status: 200 OK
-  - Body: { id: 123, status: 'accepted', updated_at: '...' }
-```
-
-### Passo 2: Localizar handler no backend
-
-**Arquivo**: `backend/src/routes/devolutions.js`
-
-```javascript
-router.post('/:id/accept', async (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-
-  // 1. Buscar devolução no BD
-  const devolution = await Devolution.findById(id);
-
-  // 2. Atualizar status
-  devolution.status = 'accepted';
-  devolution.reason = reason;
-  await devolution.save();
-
-  // 3. Chamar API Mercado Livre (atualizar lá também)
-  await ml_api.acceptDevolution(id);
-
-  // 4. Retornar resposta
-  res.json(devolution);
-});
-```
-
-### Passo 3: Rastrear integração com ML
-
-```javascript
-// Arquivo: backend/src/services/ml_api.js
-
-async function acceptDevolution(devolutionId) {
-  // ML usa OAuth token (em .env)
-  const token = process.env.ML_ACCESS_TOKEN;
-
-  // Chamar API ML para atualizar devolução
-  const response = await fetch(
-    `https://api.mercadolivre.com/devolutions/${devolutionId}`,
-    {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ status: 'accepted' })
-    }
-  );
-
-  return response.json();
-}
-```
-
-### Passo 4: Visualizar no DevTools
-
-```
-1. Network tab → POST /api/devolutions/123/accept
-2. Clique nela → "Response"
-3. Veja o JSON retornado
-4. Verifique timestamp para confirmar que atualizou
-```
-
----
-
-## ✨ Tarefas Comuns
-
-### Task 1: Adicionar nova coluna na tabela de devoluções
-
-```jsx
-// Arquivo: frontend/src/components/DevolutionsList.jsx
-
-// Antes:
-// <tr><td>ID</td><td>Produto</td><td>Status</td></tr>
-
-// Depois:
-// <tr><td>ID</td><td>Produto</td><td>Status</td><td>Data</td><td>Ações</td></tr>
-
-const columns = ['id', 'product', 'status', 'created_at', 'actions'];
-
-return (
-  <table>
-    <thead>
-      <tr>{columns.map(col => <th key={col}>{col}</th>)}</tr>
-    </thead>
-    <tbody>
-      {devolutions.map(dev => (
-        <tr key={dev.id}>
-          <td>{dev.id}</td>
-          <td>{dev.product}</td>
-          <td>{dev.status}</td>
-          <td>{new Date(dev.created_at).toLocaleDateString('pt-BR')}</td>
-          <td>
-            <button onClick={() => accept(dev.id)}>Aceitar</button>
-            <button onClick={() => reject(dev.id)}>Rejeitar</button>
-          </td>
-        </tr>
-      ))}
-    </tbody>
-  </table>
-);
-```
-
-### Task 2: Adicionar filtro por status
-
-```jsx
-const [filter, setFilter] = useState('all');
-
-const filtered = devolutions.filter(dev =>
-  filter === 'all' || dev.status === filter
-);
-
-return (
-  <>
-    <select value={filter} onChange={e => setFilter(e.target.value)}>
-      <option value="all">Todas</option>
-      <option value="pending">Pendentes</option>
-      <option value="accepted">Aceitas</option>
-      <option value="rejected">Rejeitadas</option>
-    </select>
-    
-    <table>
-      {/* renderizar filtered */}
-    </table>
-  </>
-);
-```
-
-### Task 3: Adicionar notificação sonora/visual
-
-```jsx
-useEffect(() => {
-  if (newDevolution) {
-    // Som
-    const audio = new Audio('/notification.mp3');
-    audio.play();
-
-    // Notificação visual
-    alert(`Nova devolução: ${newDevolution.product}`);
-  }
-}, [newDevolution]);
-```
-
----
-
-## 🧪 Testando Mudanças
-
-### Teste local (sem deploy)
+### 6. Limpar cache (forcar repopulacao integral)
 
 ```bash
-# Terminal 1: Rodar Seller Hub
-cd C:\Users\mansa\OneDrive\Área de Trabalho\seller-hub
-python app.py
-
-# Terminal 2: Rodar backend (opcional, usa node_modules existing)
-cd projeto-devolucoes/backend
-npm start
-
-# Terminal 3: Rodar frontend (opcional)
-cd projeto-devolucoes/frontend
-npm run dev
-
-# Browser: Abrir http://127.0.0.1:5000/devolucoes
+venv/bin/python -c "from app import db
+with db() as c:
+    c.execute('DELETE FROM ml_claim_classifications')
+    print('cache limpo')"
 ```
 
-### Teste automático
+Proximo Atualizar ML demora ~20-30s para repopular.
+
+### 7. Re-autorizar ML (token expirou)
+
+Abrir no navegador: `http://127.0.0.1:5010/mercadolivre/auth/start`. Aceitar permissoes. Sera redirecionado de volta com `ML_ACCESS_TOKEN` e `ML_REFRESH_TOKEN` atualizados no `.env`.
+
+Se preferir CLI:
 
 ```bash
-cd projeto-devolucoes/backend
-
-# Rodar testes
-npm test
-
-# Ver cobertura
-npm test -- --coverage
+# o codigo refresh_token roda automaticamente quando ml_request recebe 401
+# manualmente:
+venv/bin/python -c "from app import ml_access_token; print(ml_access_token(force_refresh=True))"
 ```
 
----
-
-## 📦 Produção (Deploy)
-
-### Antes de fazer push para produção:
-
-1. **Teste localmente** ✅
-2. **Rode testes** ✅
-3. **Build de produção** ✅
+### 8. Importar pedido manualmente (sem usar a UI)
 
 ```bash
-# Build frontend
-cd projeto-devolucoes/frontend
-npm run build    # Gera dist/
-
-# Verificar build
-ls -la dist/
+venv/bin/python -c "from app import build_devolucao_from_identifier, upsert_ml_devolucao
+item = build_devolucao_from_identifier('2000016385699074')
+action = upsert_ml_devolucao(item)
+print(action, item['ml_claim_id'])"
 ```
 
-4. **Commit e push**
+### 9. Inspecionar uma classificacao especifica
 
 ```bash
-git add -A
-git commit -m "feat: melhorias no módulo de devoluções"
-git push
+venv/bin/python -c "from app import db
+import json
+with db() as c:
+    row = c.execute('SELECT * FROM ml_claim_classifications WHERE claim_id=?', ['5515780140']).fetchone()
+    if row:
+        d = dict(row)
+        d['payload'] = json.loads(d['payload'])
+        d['seller_actions'] = json.loads(d['seller_actions'])
+        d['order_ids'] = json.loads(d['order_ids'])
+        print(json.dumps(d, indent=2, ensure_ascii=False, default=str)[:4000])"
 ```
 
-5. **Deploy no servidor**
+### 10. Alterar UI (template + JS inline)
 
-```bash
-# No servidor VPS
-cd /opt/projeto-devolucoes
-git pull
-cd backend && npm install && npm start &
-cd frontend && npm install && npm run build
+Arquivo: `templates/devolucoes.html`. JS inline no fim do `<body>`.
+
+Flask renderiza com `render_template`. Em modo nao-debug pode cachear template em memoria. **Reiniciar Flask** apos editar o template.
+
+Estilos em `static/styles.css`. Hot reload nao tem; recarrega no navegador apos save.
+
+### 11. Adicionar teste
+
+Arquivo: `tests/test_ml_contract.py`. Classe: `MercadoLivreContractTests`.
+
+Padrao para isolar DB:
+
+```python
+def test_minha_coisa(self):
+    with tempfile.TemporaryDirectory() as tmpdir, patch.object(app, "DB_PATH", Path(tmpdir) / "test.sqlite"):
+        app.init_database()
+        # ...
 ```
 
-6. **Reiniciar Docker do Seller Hub**
+Para testar endpoints:
 
-```bash
-docker compose -f docker-compose.prod.yml up -d --build
+```python
+with app.app.test_client() as client:
+    with client.session_transaction() as session:
+        session["logged_in"] = True
+    response = client.get("/api/devolucoes/cards?bucket=para_revisao")
 ```
 
----
+### 12. Deploy / producao
 
-## 🎯 Checklist antes de começar a trabalhar
+Este projeto **nao tem deploy automatizado**. Roda local na maquina NVS. Se algum dia for para producao, considerar:
 
-- [ ] Node.js instalado (`node --version`)
-- [ ] npm instalado (`npm --version`)
-- [ ] Seller Hub rodando (`python app.py`)
-- [ ] Conseguir acessar http://127.0.0.1:5000/login
-- [ ] Conseguir clicar em "Gestão de Devoluções"
-- [ ] Backend + Frontend iniciam (sem erros)
-- [ ] VSCode aberto na pasta correta (`code .`)
-- [ ] Git configurado (`git config --list`)
+- WSGI server (gunicorn/uwsgi) em vez de `app.run`
+- HTTPS via proxy reverso
+- `ML_ACCESS_TOKEN` rotacionado
+- `data/devolucoes.sqlite` em volume persistente
 
----
+## Problemas Conhecidos
 
-## 🆘 SOS - Problemas Comuns
+### Erro 500 ao clicar bucket
 
-| Problema | Causa | Solução |
-|----------|-------|---------|
-| "Ferramenta não inicia" | npm não instalado | Instalar Node.js |
-| Backend OK, frontend não | Vite está lento | Esperar 5-10s, recarregar |
-| Hot-reload não funciona | Arquivo em node_modules | Reiniciar `npm run dev` |
-| Porta 5173 já em uso | Outro processo | `lsof -i :5173` → kill |
-| Erro "Cannot find module" | Dependência faltante | `npm install <nome>` |
-| BD não conecta | Credenciais `.env` | Verificar `.env` do backend |
+Schema desatualizado (ALTER nao rodou ainda). Reiniciar Flask roda `init_database` que aplica `ALTER TABLE ADD COLUMN` condicional.
 
----
+### Cards vazios apos bumpar `ML_CLASSIFIER_VERSION`
 
-## 📚 Recursos
+Cache invalidado. Clicar Atualizar ML repopula (~20-30s).
 
-- **Documentação Vite**: https://vitejs.dev/
-- **React Docs**: https://react.dev/
-- **Express.js**: https://expressjs.com/
-- **Mercado Libre API**: https://developers.mercadolibre.com.br/
+### "Para sua revisao" diverge do ML por 1 ou 2
 
----
+Verificar regra `unified` ainda eh suficiente. Pode ser que algum claim novo use `return_review_ok` sem sufixo. Adicionar essas variantes ao set `review_actions` em `classify_ml_live_queue_claim`.
 
-**Sucesso! Agora você sabe como trabalhar no módulo de devoluções! 🎉**
+### "Outros problemas" diverge do ML
+
+Verificar `ML_LIVE_QUEUE_OUTROS_LIMIT`. Se ML mostrar 22 e local mostrar 21, ajustar para 22.
+
+### F5 mostra numero estranho
+
+Conferir que `carregarTudo()` chama `carregarResumoML()` no boot (parallel `Promise.all`). Bug historico ja corrigido mas voltar conferir.
+
+### Click em "Abrir fluxo" parece nao fazer nada
+
+CSS pode ter `display:none` no `#detalhe`. Solucao atual eh `abrirDetalhe(id, "modal")` que ignora o `#detalhe`. Conferir `templates/devolucoes.html` busca por `target = "painel"`.
+
+## Convencoes
+
+- Flask roda na 5010 (nao colidir com warehouse-picker em outra porta)
+- Strings de cliente em portugues sem acentos no codigo (compatibilidade legacy)
+- `motivo_label` mapeia PDD codes (ex: `PDD9939` -> "O comprador se arrependeu")
+- Buckets: `para_revisao`, `para_retirar`, `outros_problemas`, `fora_da_fila`, `erro`
+- Numeros do painel ML devem bater **exatos**. Se divergir, eh bug.
+
+## Boa Pratica de Codigo
+
+- **classifier eh sagrado**: nao tocar sem motivo real + testes. Buggy aqui = numeros errados na UI = perda de confianca.
+- **`apply_ml_queue_window` deve ser idempotente**: nao introduzir estado que dependa de "primeira execucao".
+- **Adicionar campo ao cache?** Bumpa enrichment_version. Sem isso, cache antigo retorna sem o campo.
+- **Adicionar bucket?** Bumpa classifier_version. Sem isso, cache antigo retorna bucket errado.
+- **Nao explodir `.env`** em logs ou respostas.
+- **Trace tudo**: usar `add_ml_trace_event` para passos novos no refresh; facilita debug.
+
+## Referencias
+
+- doc oficial ML: https://developers.mercadolivre.com.br/pt_br/gerenciar-devolucoes
+- `HANDOFF_CLAUDE.md`: estado completo + endpoints
+- `ENTENDER_DEVOLUCOES.md`: arquitetura + decisoes de design
+- `DEVOLUCOES_DIAGRAMA.txt`: diagrama ASCII

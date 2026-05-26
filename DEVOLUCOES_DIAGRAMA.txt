@@ -1,286 +1,346 @@
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                  ARQUITETURA COMPLETA - MÓDULO DE DEVOLUÇÕES                 ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
+============================================================================
+        ARQUITETURA COMPLETA - MODULO DE DEVOLUCOES (atualizado 2026-05-26)
+============================================================================
 
-📱 NAVEGADOR DO USUÁRIO
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ http://127.0.0.1:5000/devolucoes                                           │
-│                                                                             │
-│ ┌─ HTML (Jinja2 Template) ──────────────────────────────────────────────┐  │
-│ │ ┌─────────────────────────────────────────────────────────────────┐   │  │
-│ │ │ Gestão de Devoluções (Multiplataforma)                          │   │  │
-│ │ ├─────────────────────────────────────────────────────────────────┤   │  │
-│ │ │ [Backend: 🟢 OK]  [Frontend: 🟡 Aguardando...]               │   │  │
-│ │ │ [Autorizar ML] [Abrir ferramenta] [Parar]                      │   │  │
-│ │ ├─────────────────────────────────────────────────────────────────┤   │  │
-│ │ │                                                                 │   │  │
-│ │ │   ┌─────────────────────────────────────────────────────────┐   │   │  │
-│ │ │   │ <iframe src="/devolucoes-app/">                         │   │   │  │
-│ │ │   │   └─ Carregando ferramenta...                           │   │   │  │
-│ │ │   │   (mostra React App de devoluções)                      │   │   │  │
-│ │ │   └─────────────────────────────────────────────────────────┘   │   │  │
-│ │ │                                                                 │   │  │
-│ │ │ Logs:                                                           │   │  │
-│ │ │ backend: iniciado                                               │   │  │
-│ │ │ backend: health check ok                                        │   │  │
-│ │ │ frontend: iniciado                                              │   │  │
-│ │ │ frontend: vite compilando...                                    │   │  │
-│ │ │ frontend: ✅ build sucesso                                     │   │  │
-│ │ └─────────────────────────────────────────────────────────────────┘   │  │
-│ └─ JavaScript (hot reload, resize iframe) ──────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      ↓
-                      SERVIDOR FLASK (Python)
-                     127.0.0.1:5000 (seller-hub)
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  Rota 1: GET /devolucoes                                                  │
-│  ├─ Verifica: session["logged_in"] ✓                                      │
-│  ├─ Chama: devolucoes_runner.start()                                      │
-│  └─ Retorna: template com snapshot                                        │
-│                                                                             │
-│  Rota 2: POST /devolucoes/start                                           │
-│  ├─ Verifica: session["logged_in"] ✓                                      │
-│  ├─ Chama: devolucoes_runner.start()                                      │
-│  └─ Redireciona: GET /devolucoes                                          │
-│                                                                             │
-│  Rota 3: POST /devolucoes/stop                                            │
-│  ├─ Verifica: session["logged_in"] ✓                                      │
-│  ├─ Chama: devolucoes_runner.stop()                                       │
-│  └─ Redireciona: GET /devolucoes                                          │
-│                                                                             │
-│  Rota 4: GET /devolucoes-app/                                             │
-│  ├─ Proxy para: http://127.0.0.1:5173/devolucoes-app/                    │
-│  └─ Retorna: HTML/JS da ferramenta (Frontend React)                       │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      ↓
-                    PYTHON MANAGER (src/devolucoes_app.py)
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  Classe: DevolucoesAppRunner                                              │
-│  ├─ __init__(project_dir)                                                 │
-│  │  └─ self.project_dir = "C:\...\projeto-devolucoes"                    │
-│  │  └─ self.backend_process = None                                        │
-│  │  └─ self.frontend_process = None                                       │
-│  │  └─ self.logs = deque(maxlen=400)                                      │
-│  │                                                                         │
-│  ├─ start() → INICIA SUBPROCESSOS                                         │
-│  │  │                                                                     │
-│  │  ├─ Backend:                                                          │
-│  │  │  ├─ cwd = projeto-devolucoes/backend/                             │
-│  │  │  ├─ cmd = npm start                                               │
-│  │  │  └─ porta = 3001                                                   │
-│  │  │  └─ envia variáveis de .env                                        │
-│  │  │  └─ coleta stdout/stderr em thread daemon                          │
-│  │  │                                                                     │
-│  │  └─ Frontend:                                                         │
-│  │     ├─ cwd = projeto-devolucoes/frontend/                            │
-│  │     ├─ cmd = npm run dev --host 127.0.0.1 --port 5173               │
-│  │     ├─ --base /devolucoes-app/                                       │
-│  │     └─ porta = 5173                                                   │
-│  │     └─ coleta stdout/stderr em thread daemon                          │
-│  │                                                                         │
-│  ├─ stop() → PARA SUBPROCESSOS                                           │
-│  │  ├─ frontend_process.terminate() (SIGTERM)                           │
-│  │  └─ backend_process.terminate() (SIGTERM)                            │
-│  │                                                                         │
-│  └─ snapshot() → ESTADO ATUAL                                            │
-│     ├─ backend_ok = GET http://127.0.0.1:3001/health                   │
-│     ├─ frontend_ok = GET http://127.0.0.1:5173                         │
-│     ├─ running = if process.poll() is None                             │
-│     └─ logs = list(self.logs) últimas 400 linhas                        │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────────┘
-                        ↙                              ↘
-            BACKEND NODE.JS                    FRONTEND REACT
-       projeto-devolucoes/backend              projeto-devolucoes/frontend
-         (npm start, port 3001)               (npm run dev, port 5173)
-┌──────────────────────────────────┐  ┌────────────────────────────────────┐
-│                                  │  │                                    │
-│  Estrutura:                      │  │  Estrutura:                        │
-│  ├─ src/                         │  │  ├─ src/                          │
-│  │  ├─ index.js                  │  │  │  ├─ App.jsx (raiz)             │
-│  │  │  (express app)             │  │  │  ├─ main.jsx (entry point)     │
-│  │  │                            │  │  │  ├─ components/                │
-│  │  ├─ routes/                   │  │  │  │  ├─ DevolutionsList.jsx     │
-│  │  │  ├─ devolutions.js         │  │  │  │  ├─ DevolutionDetail.jsx    │
-│  │  │  ├─ mercadolivre.js        │  │  │  │  └─ Actions.jsx             │
-│  │  │  └─ shopee.js              │  │  │  └─ pages/                     │
-│  │  │                            │  │  │     └─ index.jsx               │
-│  │  ├─ services/                 │  │  ├─ vite.config.js                │
-│  │  │  └─ ml_api.js              │  │  └─ package.json                  │
-│  │  │  └─ shopee_api.js          │  │                                    │
-│  │  │                            │  │  Funcionalidade:                   │
-│  │  └─ middleware/               │  │  ├─ Lista devoluções               │
-│  │     └─ auth.js                │  │  ├─ Detalhes de cada uma           │
-│  │                               │  │  ├─ Botões (aceitar, rejeitar)     │
-│  ├─ package.json                 │  │  ├─ Filters/Search                 │
-│  └─ node_modules/                │  │  └─ Status em tempo real            │
-│                                  │  │                                    │
-│  Endpoints:                      │  │  Comunica com:                     │
-│  ├─ GET /health                  │  │  ├─ Backend (GET /api/...)         │
-│  │  └─ { status: 'ok' }          │  │  ├─ Backend (POST /api/...)        │
-│  │                               │  │  └─ Armazena estado local          │
-│  ├─ GET /api/devolutions         │  │                                    │
-│  │  └─ retorna lista de devol.   │  │  Usa:                              │
-│  │                               │  │  ├─ React Hooks (useState, useEffect)
-│  ├─ POST /api/devolutions/:id/ac │  │  ├─ Fetch API para chamadas       │
-│  │  └─ aceita devolução          │  │  ├─ CSS para estilo               │
-│  │                               │  │  └─ React Router (navegação)       │
-│  ├─ POST /api/devolutions/:id/re │  │                                    │
-│  │  └─ rejeita devolução         │  │                                    │
-│  │                               │  │                                    │
-│  Integra com:                    │  │                                    │
-│  ├─ Mercado Livre API            │  │                                    │
-│  │  └─ OAuth token (em .env)     │  │                                    │
-│  │  └─ GET/PUT /devolutions      │  │                                    │
-│  │                               │  │                                    │
-│  └─ Shopee API                   │  │                                    │
-│     └─ Access token (em .env)    │  │                                    │
-│     └─ GET/PUT /returns          │  │                                    │
-│                                  │  │                                    │
-└──────────────────────────────────┘  └────────────────────────────────────┘
+NAVEGADOR DO USUARIO
++----------------------------------------------------------------------------+
+| http://127.0.0.1:5010/devolucoes                                           |
+|                                                                            |
+| +-- HTML (Jinja2 + JS inline) ----------------------------------------+   |
+| |                                                                      |   |
+| | [ENTRADA DE DEVOLUCAO]   [Pedido/pacote/rastreio]   [Buscar venda]  |   |
+| |                                                     [Atualizar ML]  |   |
+| |                                                                      |   |
+| | [Proximas a serem atendidas]                                  23    |   |
+| |   Para sua revisao                                              2   |   |
+| |   Para retirar no correio                                       0   |   |
+| |   Outros problemas                                             21   |   |
+| |                                                                      |   |
+| | [Pendencias > Em andamento (checklists iniciados)] [Visualizar]     |   |
+| +----------------------------------------------------------------------+   |
++----------------------------------------------------------------------------+
+                                |
+                                | HTTP requests (cookies Flask session)
+                                v
+============================================================================
+                  FLASK MONOLITICO (porta 5010)
+                  app.py + templates/ + static/ + data/
+============================================================================
+
+  +-- Rotas Flask -----------------------------------------------------+
+  |                                                                    |
+  |  GET  /                       redirect login/devolucoes            |
+  |  GET  /login          POST    autentica via PIN local              |
+  |  GET  /devolucoes             render_template("devolucoes.html")   |
+  |  GET  /uploads/<path>         send_from_directory                  |
+  |  GET  /mercadolivre/auth/*    OAuth dance ML                       |
+  |                                                                    |
+  |  -- Cards e resumo (lem do cache) --                               |
+  |  GET  /api/devolucoes/filtros-ml      resumo por bucket            |
+  |  GET  /api/resumo-ml                  mesmo resumo                 |
+  |  GET  /api/devolucoes/cards?bucket=   lista de cards do bucket     |
+  |  GET  /api/devolucoes/fila-ml-live    versao ao vivo (sem cache)   |
+  |                                                                    |
+  |  -- Sincronizacao --                                               |
+  |  POST /api/devolucoes/sincronizar-ml          atualiza cache       |
+  |  POST /api/devolucoes/sincronizar-ml-completo legado pesado        |
+  |                                                                    |
+  |  -- Operacional (tabela devolucoes) --                             |
+  |  GET  /api/devolucoes                 lista local                  |
+  |  POST /api/devolucoes                 cria manual                  |
+  |  POST /api/pedidos/importar           importa por id/rastreio      |
+  |  GET  /api/devolucoes/<id>            detalhe                      |
+  |  PATCH /api/devolucoes/<id>/status                                 |
+  |  POST /api/devolucoes/<id>/chegada    confirma chegada (chama ML)  |
+  |  GET  /api/devolucoes/<id>/checklist                               |
+  |  POST /api/devolucoes/<id>/checklist                               |
+  |  POST /api/devolucoes/<id>/checklist/progresso                     |
+  |  GET  /api/devolucoes/<id>/evidencias                              |
+  |  POST /api/devolucoes/<id>/evidencias/upload                       |
+  |  DELETE /api/devolucoes/<id>/evidencias/<eid>                      |
+  |  GET  /api/devolucoes/<id>/contestacoes                            |
+  |  POST /api/devolucoes/<id>/contestacoes                            |
+  |  POST /api/devolucoes/<id>/mediacao/mensagem                       |
+  |  GET  /api/devolucoes/<id>/historico                               |
+  |  GET  /api/devolucoes/historico/incompletos                        |
+  |                                                                    |
+  |  -- Auditoria/Trace --                                             |
+  |  GET  /api/devolucoes/sync-diagnostico                             |
+  |  GET  /api/devolucoes/sync-trace/ultimo                            |
+  |  GET  /api/devolucoes/sync-trace/<trace_id>                        |
+  +--------------------------------------------------------------------+
+                  |
+                  | api.mercadolibre.com (OAuth Bearer)
+                  v
+============================================================================
+            MERCADO LIVRE API (post-purchase / orders / items)
+============================================================================
+  GET  /post-purchase/v1/claims/search?user_id=&status=&type=&limit=
+  GET  /post-purchase/v1/claims/<claim_id>
+  GET  /post-purchase/v2/claims/<claim_id>/returns
+  GET  /post-purchase/v1/returns/<return_id>/reviews
+  POST /post-purchase/v1/returns/<return_id>/return-review  (body {} = OK)
+  GET  /orders/<order_id>
+  GET  /items/<item_id>
+============================================================================
 
 
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                         FLUXO DE UMA REQUISIÇÃO                              ║
-║               "Usuário clica ACEITAR devolução"                              ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
+PERSISTENCIA LOCAL (data/devolucoes.sqlite)
+============================================================================
+  devolucoes
+    - operacional pos-import (checklist, evidencias, contestacoes, etc)
+    - colunas ml_* enriquecidas
+    - ml_ativo = 1 enquanto na fila ML
 
-1. Frontend (React)
-   ├─ onClick: handleAccept(devolutionId)
-   └─ fetch('http://127.0.0.1:3001/api/devolutions/123/accept', {
-        method: 'POST',
-        body: JSON.stringify({ reason: 'Item danificado' })
-      })
-                    ↓
-2. Backend (Node.js) - Route Handler
-   ├─ POST /api/devolutions/123/accept
-   ├─ Recebe: { reason: 'Item danificado' }
-   ├─ 1. Busca devolution no BD
-   │     const dev = await Devolution.findById(123)
-   ├─ 2. Atualiza BD
-   │     dev.status = 'accepted'
-   │     dev.reason = 'Item danificado'
-   │     await dev.save()
-   ├─ 3. Atualiza no Mercado Livre
-   │     await ml_api.acceptDevolution(123)
-   │        └─ PUT https://api.mercadolivre.com/devolutions/123
-   │           headers: Authorization: Bearer <ML_TOKEN>
-   │           body: { status: 'accepted' }
-   ├─ 4. Atualiza no Shopee (se aplicável)
-   │     await shopee_api.acceptDevolution(123)
-   │        └─ PUT https://api.shopee.com/returns/123
-   │           headers: Authorization: Bearer <SHOPEE_TOKEN>
-   │           body: { status: 'accepted' }
-   └─ res.json({ id: 123, status: 'accepted', ... })
-                    ↓
-3. Frontend (React) - recebe resposta
-   ├─ Status 200 OK
-   ├─ Atualiza estado: setDevolutions([...])
-   ├─ Mostra notificação: "✅ Devolução aceita!"
-   └─ UI se atualiza automaticamente
-                    ↓
-4. Usuário vê a mudança
-   ├─ Status muda de "Pendente" para "Aceita"
-   ├─ Cor muda (amarelo → verde)
-   └─ Devolution sai da lista "Pendentes"
+  ml_claim_classifications  <-- FONTE DE VERDADE dos cards e modal de bucket
+    - chave claim_id
+    - bucket (para_revisao | para_retirar | outros_problemas | fora_da_fila)
+    - regra (snake_case descrevendo origem da classificacao)
+    - active (1 = na fila atual, 0 = fora)
+    - last_updated do claim (chave de cache hit/miss)
+    - colunas enriquecidas: produto_nome, produto_imagem,
+                            valor_pago, taxa_venda, ml_tipo_logistica,
+                            motivo_label, pack_id, mandatory, due_date,
+                            date_created
+    - payload (JSON snapshot completo + classifier_version + enrichment_version)
+
+  historico_status, checklists, evidencias, contestacoes
+    - fluxo operacional vinculado a devolucoes.id
+
+  ml_sync_runs            - cada execucao do refresh
+  ml_raw_payloads         - snapshots brutos
+  ml_trace_events         - passos cronologicos por trace_id
+  ml_reconciliation_diffs - divergencias detectadas
 
 
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                    VARIÁVEIS DE AMBIENTE (.env)                              ║
-║                 Usadas pelo módulo de devoluções                             ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
+FLUXO DETALHADO: ATUALIZAR ML
+============================================================================
 
-Seller Hub:
-  DEVOLUCOES_PROJECT_DIR=C:\...\projeto-devolucoes
-  DEVOLUCOES_BACKEND_PORT=3001
-  DEVOLUCOES_FRONTEND_PORT=5173
-
-Backend (projeto-devolucoes/backend):
-  ML_CLIENT_ID=...         (OAuth)
-  ML_CLIENT_SECRET=...     (OAuth)
-  ML_ACCESS_TOKEN=...      (ou obtém automaticamente)
-  SHOPEE_ACCESS_TOKEN=...
-  SHOPEE_SHOP_ID=...
-  DATABASE_URL=...         (se usar BD)
-
-Frontend:
-  (carrega via window.CONFIG ou hardcoded)
-
-
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                      SEQUÊNCIA DE INICIALIZAÇÃO                              ║
-║            O que acontece quando você clica "Abrir ferramenta"               ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
-
-T=0s:   Usuário clica "Abrir ferramenta"
-        └─ POST /devolucoes/start
-
-T=0s:   Flask chama devolucoes_runner.start()
-        ├─ BACKEND inicia: npm start (cwd=backend/)
-        │  └─ Carrega dependências
-        │  └─ Inicia Express server
-        │  └─ Conecta no BD (se tiver)
-        │  └─ Expõe porta 3001
-        │
-        └─ FRONTEND inicia: npm run dev (cwd=frontend/)
-           └─ Carrega dependências (se não em cache)
-           └─ Inicia Vite dev server
-           └─ Expõe porta 5173
-           └─ Começa compilação de React
-
-T=1-2s: Backend respondendo em 3001
-        └─ logs: "backend: listening on port 3001"
-        └─ HTML mostra [Backend: ✅ OK]
-
-T=3-5s: Frontend pronto em 5173
-        └─ logs: "frontend: VITE v5.0.0 building for production..."
-        └─ logs: "frontend: ✅ built successfully"
-        └─ HTML mostra [Frontend: ✅ OK]
-
-T=5s:   <iframe src="/devolucoes-app/"> é renderizado
-        └─ Proxy Flask redireciona para http://127.0.0.1:5173/devolucoes-app/
-        └─ Frontend React carrega
-        └─ React chama GET /api/devolutions (backend)
-        └─ Lista de devoluções aparece
-
-T=6s:   Tudo pronto!
-        └─ Usuário vê interface funcional
-        └─ Pode aceitar/rejeitar devoluções
+  JS click em [Atualizar ML]
+    |
+    v
+  POST /api/devolucoes/sincronizar-ml
+    |
+    v
+  api_sincronizar_ml()
+    |--> start_ml_sync_run("classification_cache")
+    |--> add_ml_trace_event("sync_start")
+    |
+    v
+  refresh_ml_classification_cache(user_id, sync_run_id, trace_id)
+    |
+    |--> ml_live_claims_for_queue(user_id, max_pages=3)
+    |      |
+    |      |--> ml_claims_search returns/opened  (3 pages, ate 100/pg)
+    |      |--> ml_claims_search returns/closed  (1 page)
+    |      |--> ml_claims_search mediations/opened (3 pages)
+    |      |--> ml_claims_search mediations/closed (1 page)
+    |      |--> filtra com claim_has_listed_seller_action
+    |
+    |--> ThreadPool(4) inspect_claim_for_queue para cada claim
+    |      |
+    |      |--> cached_claim_classification(claim_id, last_updated)?
+    |      |     hit: retorna payload  (cache_hits++)
+    |      |     miss:
+    |      |       --> ml_get /post-purchase/v1/claims/<id>
+    |      |       --> claim_return_info(<id>) (returns endpoint)
+    |      |       --> fetch_order_for_claim (/orders/<id>)
+    |      |       --> order_visuals (produto, valor, taxa, full)
+    |      |       --> bucket_action_meta (mandatory, due_date)
+    |      |       --> classify_ml_live_queue_claim -> bucket + regra
+    |      |       --> save_claim_classification(item)
+    |      |       (cache_misses++)
+    |
+    |--> apply_ml_queue_window(rows)
+    |      |--> restaura bucket natural (remove sufixo :outside_recent_window)
+    |      |--> ordena outros_problemas por last_updated DESC
+    |      |--> top 21 = active, resto = rebaixado a fora_da_fila
+    |
+    |--> UPDATE ml_claim_classifications SET active=0
+    |--> UPDATE ml_claim_classifications SET active=1 WHERE claim_id IN (...)
+    |
+    |--> retorna resumo via resumo_from_classification_cache()
+    |
+    v
+  finish_ml_sync_run + add_ml_trace_event("sync_finish")
+    |
+    v
+  JSON { resumo, trace_id, declarados, inspecionados, cache_hits, ... }
+    |
+    v
+  JS recebe -> aplicarResumoML -> renderUrgencias -> cards atualizados
 
 
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                           TROUBLESHOOTING                                     ║
-║                Onde procurar se algo der errado                              ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
+FLUXO DETALHADO: CLICAR EM BUCKET
+============================================================================
 
-Backend não responde (3001):
-  └─ Ver logs Python na página: "backend: ..."
-  └─ Procurar erro como "EADDRINUSE" (porta em uso)
-  └─ Solução: kill processo ou mudar porta em .env
+  JS click em .summary-item[data-bucket="para_revisao"]
+    |
+    v
+  abrirPainelCardsBucket("para_revisao", "Para sua revisao")
+    |
+    v
+  GET /api/devolucoes/cards?bucket=para_revisao
+    |
+    v
+  api_cards_por_bucket()
+    SELECT * FROM ml_claim_classifications
+    WHERE active=1 AND bucket='para_revisao'
+    ORDER BY due_date ASC, last_updated DESC
+    |
+    v
+  JSON { bucket, total, cards: [...] }
+    |
+    v
+  JS renderiza grid com bucketCardHTML(card)
+    cards mostram: produto_imagem, pedido_id, produto_nome,
+                   ml_tipo_logistica (FULL/ORGANICA), motivo_label,
+                   valor_pago, taxa_venda, due_date
 
-Frontend não carrega (5173):
-  └─ Ver logs Python: "frontend: ..."
-  └─ Procurar erro como "Cannot find module"
-  └─ Solução: npm install ou restart npm run dev
 
-Devoluções não aparecem:
-  └─ Abrir DevTools (F12) → Network
-  └─ Procurar GET /api/devolutions
-  └─ Ver status (200? 500?)
-  └─ Ver resposta (lista vazia? erro?)
-  └─ Verificar BD/credenciais de API
+FLUXO DETALHADO: ABRIR FLUXO (no card)
+============================================================================
 
-Botão não funciona:
-  └─ F12 → Console → procurar erro vermelho
-  └─ Procurar função em código (ctrl+shift+f)
-  └─ Verificar se POST foi feito (Network tab)
-  └─ Verificar resposta do backend (status 200? erro?)
+  JS click em [Abrir fluxo] dentro do card
+    |
+    v
+  POST /api/pedidos/importar { pedido_id }
+    |
+    v
+  api_importar_pedido()
+    --> build_devolucao_from_identifier (busca ML + claim + return + order)
+    --> upsert_ml_devolucao
+    |
+    v
+  JSON { mensagem, action, devolucao }
+    |
+    v
+  abrirDetalhe(devolucao.id, "modal")
+    |
+    |--> GET /api/devolucoes/<id>
+    |--> GET /api/devolucoes/<id>/historico
+    |--> GET /api/devolucoes/<id>/checklist
+    |--> GET /api/devolucoes/<id>/evidencias
+    |--> GET /api/devolucoes/<id>/contestacoes
+    |
+    v
+  Modal flutuante recebe HTML do detalhe:
+    - titulo (produto + pedido)
+    - 3 steps: chegou esperado / nao chegou / falar com ML
+    - secao chegada com 2 botoes (Chegou esperado, Nao chegou)
+    - detalhe do produto (cliente, motivo, valor, rastreio)
+    - checklist (form com 11 checkboxes)
+    - evidencias (upload + galeria)
+    - contestacao (form + gerar mediacao)
+    - historico
 
-Logs confusos:
-  └─ npm pode gerar muito output
-  └─ Procurar linhas com ✅ ou ❌ ou erro
-  └─ Procurar "listening on" ou "ready in"
-  └─ Se muitos erros, pode ser dependência faltante
+
+FLUXO DETALHADO: CONFIRMAR CHEGADA ESPERADA
+============================================================================
+
+  JS click em #chegouEsperado
+    |
+    v
+  POST /api/devolucoes/<id>/chegada { resultado: "esperado" }
+    |
+    v
+  api_chegada()
+    --> ml_confirm_return_review_ok(claim_id)
+        |--> ml_get /post-purchase/v1/claims/<claim_id>
+        |--> ml_get /post-purchase/v2/claims/<claim_id>/returns
+        |--> POST /post-purchase/v1/returns/<return_id>/return-review {}
+        |     (fallback: POST .../claims/<id>/actions/return-review-ok)
+    --> UPDATE devolucoes
+          SET chegada_status='esperado',
+              status='sem_divergencia',
+              requer_acao=0,
+              ml_ativo=0
+    --> INSERT historico_status
+    |
+    v
+  JSON { mensagem, devolucao, ml }
+    |
+    v
+  JS recarrega tudo (carregarTudo + carregarResumoML)
+
+
+VERSIONAMENTO DE CACHE
+============================================================================
+
+  ML_CLASSIFIER_VERSION = "actions-v3"
+    - bumpar quando mudar regra de bucket
+    - invalida cache: cache miss em todos -> repopula
+
+  ML_ENRICHMENT_VERSION = "enrich-v1"
+    - bumpar quando adicionar coluna visual ao cache
+    - mesmo efeito: invalida cache
+
+
+REGRA DE CLASSIFICACAO (classify_ml_live_queue_claim)
+============================================================================
+
+  actions = set(action_names(claim))   # players[].available_actions[].action
+
+  if actions & {"return_review_unified_ok", "return_review_unified_fail"}:
+      return "para_revisao", "seller_available_action:return_review"
+
+  if "send_message_to_mediator" in actions:
+      return "outros_problemas", "seller_available_action:send_message_to_mediator"
+
+  if claim.type == "mediations" or claim.stage == "dispute":
+      return "fora_da_fila", "mediation_without_return_review_action"
+
+  if return_status == "label_generated" and reason_id == "PDD9967":
+      return "para_retirar", "return_label_generated_with_pickup_reason"
+
+  if return_status in {label_generated, shipped, in_return, processing}:
+      return "outros_problemas", f"return_in_progress:{return_status}:..."
+
+  return "fora_da_fila", f"no_matching_queue_rule:..."
+
+
+JANELA IDEMPOTENTE (apply_ml_queue_window)
+============================================================================
+
+  # Restaurar bucket natural (idempotencia):
+  for item in rows:
+      if item.bucket == "fora_da_fila" and ":outside_recent_window" in item.regra:
+          item.bucket = "outros_problemas"
+          item.regra = item.regra.replace(":outside_recent_window", "")
+
+  # Aplicar janela:
+  outros_limit = ML_LIVE_QUEUE_OUTROS_LIMIT (default 21)
+  outros = [item for item in rows if item.bucket == "outros_problemas"]
+  top_n = sorted(outros, key=last_updated, desc)[:outros_limit]
+  ativos = {item.claim_id for item in top_n}
+  for item in rows:
+      if item.bucket == "outros_problemas" and item.claim_id not in ativos:
+          item.bucket = "fora_da_fila"
+          item.regra += ":outside_recent_window"
+
+
+CONFIG (.env)
+============================================================================
+  FLASK_SECRET_KEY         chave da sessao Flask
+  PIN_MERCADO_LIVRE        PIN local (default 1234)
+  APP_HOST=127.0.0.1
+  APP_PORT=5010
+
+  ML_CLIENT_ID
+  ML_CLIENT_SECRET
+  ML_USER_ID
+  ML_ACCESS_TOKEN          (renovado automaticamente em 401)
+  ML_REFRESH_TOKEN
+  ML_REDIRECT_URI          (callback OAuth)
+
+  ML_LIVE_QUEUE_MAX_PAGES=3       paginas abertas por tipo
+  ML_LIVE_QUEUE_CLOSED_PAGES=1    paginas fechadas por tipo
+  ML_LIVE_QUEUE_OUTROS_LIMIT=21   janela de outros_problemas
+  ML_LIVE_QUEUE_WORKERS=4         paralelismo do refresh
+
+  ML_SYNC_MAX_PAGES_OPENED=10     fluxo legado
+  ML_SYNC_MAX_PAGES_CLOSED=12
+  ML_SYNC_MAX_PAGES_CLOSED_REVIEW=2
+  ML_SYNC_MAX_PAGES_MEDIATIONS=3
+  ML_SYNC_MAX_WORKERS=1
+  ML_SYNC_MANUAL_WORKERS=4

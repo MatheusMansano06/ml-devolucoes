@@ -32,15 +32,67 @@ O arquivo `.env` foi copiado do projeto original com os valores locais existente
 
 Requisitos: Python 3.11+.
 
+macOS / Linux:
+
+```bash
+cd "/Users/julio/Documents/Antigra/warehouse-picker v2/Devoluçao"
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env
+APP_HOST=127.0.0.1 APP_PORT=5010 venv/bin/python app.py
+```
+
+Windows (PowerShell):
+
 ```powershell
-cd "C:\Users\mansa\OneDrive\Área de Trabalho\ml-devolucoes"
+cd "C:\caminho\para\Devolucao"
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+copy .env.example .env
 python app.py
 ```
 
-Ao abrir `http://127.0.0.1:5000`, informe o PIN do Mercado Livre e acesse a tela de devolucoes.
+Na maquina NVS, use uma porta separada do Warehouse Picker, por exemplo:
 
-Os pacotes Node ja foram mantidos na copia. Se precisar reinstalar:
-Nao ha etapa de `npm install`.
+```env
+APP_HOST=127.0.0.1
+APP_PORT=5010
+```
+
+Ao abrir `http://127.0.0.1:5010`, informe o PIN do Mercado Livre e acesse a tela de devolucoes.
+
+Front e API rodam no mesmo processo Flask. Nao ha frontend Vite em `5173` nem backend Express em `3001` nesta versao.
+
+## Rodar testes
+
+```bash
+venv/bin/python -m py_compile app.py
+venv/bin/python -m unittest discover -s tests -v
+```
+
+## Endpoints relevantes
+
+| Metodo | Rota | O que faz |
+|---|---|---|
+| `POST` | `/api/devolucoes/sincronizar-ml` | botao Atualizar ML (refresh do cache) |
+| `GET` | `/api/devolucoes/filtros-ml` | resumo por bucket (lido do cache) |
+| `GET` | `/api/devolucoes/cards?bucket=...` | lista de cards do bucket selecionado |
+| `GET` | `/api/devolucoes/sync-diagnostico` | ultimas execucoes de sync e contagens |
+| `GET` | `/api/devolucoes/sync-trace/ultimo` | trace detalhado do ultimo refresh |
+| `POST` | `/api/pedidos/importar` | importa pedido manual por id/rastreio |
+| `POST` | `/api/devolucoes/<id>/chegada` | confirma chegada (chama ML quando "esperado") |
+
+Lista completa em `HANDOFF_CLAUDE.md`.
+
+## Documentacao
+
+| Doc | Para que serve |
+|---|---|
+| `HANDOFF_CLAUDE.md` | Passagem de bastao + estado atual + pendencias |
+| `ENTENDER_DEVOLUCOES.md` | Arquitetura + fluxo de dados + decisoes |
+| `TRABALHAR_DEVOLUCOES.md` | Guia de tarefas comuns + debug |
+| `DEVOLUCOES_RESUMO_RAPIDO.md` | Resumo de 3 min |
+| `DEVOLUCOES_DIAGRAMA.txt` | Diagrama ASCII completo |
+
+Doc oficial ML (referencia): https://developers.mercadolivre.com.br/pt_br/gerenciar-devolucoes

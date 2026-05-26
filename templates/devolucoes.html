@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Gerenciar Devolucoes</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='meli-flow-15') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='meli-flow-17') }}">
 </head>
 <body class="app-body meli-page">
   <header class="meli-topbar">
@@ -16,7 +16,6 @@
       </button>
     </div>
     <div class="topbar-spacer"></div>
-    <button id="sincronizarMl" type="button" class="ghost-button">Sincronizar ML</button>
     <button id="novaDevolucaoBtn" type="button" class="ghost-button">Nova manual</button>
     <a class="ghost-button" href="{{ url_for('logout') }}">Sair</a>
   </header>
@@ -76,10 +75,13 @@
           <h1>Leia ou digite o ID do pedido</h1>
           <span>Use a pistola de QR code/codigo de barras ou digite o numero manualmente.</span>
         </div>
-        <form id="formImportarPedido">
-          <input id="pedidoInput" name="pedido_id" inputmode="search" autocomplete="off" placeholder="Pedido, pacote ou rastreio" autofocus>
-          <button type="submit">Buscar venda</button>
-        </form>
+        <div class="order-entry-actions">
+          <form id="formImportarPedido">
+            <input id="pedidoInput" name="pedido_id" inputmode="search" autocomplete="off" placeholder="Pedido, pacote ou rastreio" autofocus>
+            <button type="submit">Buscar venda</button>
+          </form>
+          <button id="sincronizarMl" type="button" class="update-ml-button">Atualizar ML</button>
+        </div>
         <div id="importFeedback" class="import-feedback" hidden></div>
       </section>
 
@@ -95,15 +97,15 @@
             </div>
           </div>
           <div class="summary-list">
-            <button type="button" class="summary-item active" data-urgency="revisao">
+            <button type="button" class="summary-item active" data-urgency="revisao" data-bucket="para_revisao">
               <span class="item-label">Para sua revisão</span>
               <strong class="item-count" id="paraRevisao">0</strong>
             </button>
-            <button type="button" class="summary-item" data-urgency="organica">
+            <button type="button" class="summary-item" data-urgency="organica" data-bucket="para_retirar">
               <span class="item-label">Para retirar no correio</span>
               <strong class="item-count" id="paraRetirar">0</strong>
             </button>
-            <button type="button" class="summary-item" data-urgency="full">
+            <button type="button" class="summary-item" data-urgency="full" data-bucket="outros_problemas">
               <span class="item-label">Outros problemas</span>
               <strong class="item-count" id="outrosProblemas">0</strong>
             </button>
@@ -343,9 +345,8 @@
     let urgencyFilter = "revisao";
     let historicosPendentes = [];
     let syncInProgress = false;
-    let ultimaSincronizacao = 0;
     let ultimoTotalDevolucoes = 0;
-    const SYNC_INTERVAL_MS = 30000;  // 30 segundos
+    let resumoMlAtual = null;
 
     const money = (value) => Number(value || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
     const label = (value) => String(value || "-").replaceAll("_", " ");
@@ -414,14 +415,36 @@
       }, 4000);
     };
     const api = async (url, options = {}) => {
-      const response = await fetch(url, {
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-        ...options
-      });
+      const { timeoutMs, ...fetchOptions } = options;
+      const controller = timeoutMs ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+      let response;
+      try {
+        response = await fetch(url, {
+          headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+          signal: controller?.signal,
+          ...fetchOptions
+        });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new Error("Tempo limite da sincronizacao atingido. Tente novamente em alguns segundos.");
+        }
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error([data.mensagem || data.erro || "Erro na requisicao", data.orientacao].filter(Boolean).join(" "));
       return data;
     };
+
+    function aplicarResumoML(proximas = {}) {
+      resumoMlAtual = proximas;
+      setText("paraRevisao", proximas.para_revisao || 0);
+      setText("paraRetirar", proximas.para_retirar || 0);
+      setText("outrosProblemas", proximas.outros_problemas || 0);
+      setText("totalResumoML", proximas.total || 0);
+    }
 
     async function carregarResumoML() {
       try {
@@ -429,10 +452,7 @@
         const resumo = await api("/api/devolucoes/filtros-ml");
         const proximas = resumo.proximas || {};
         console.log("[DEBUG] Resumo recebido:", proximas);
-        setText("paraRevisao", proximas.para_revisao || 0);
-        setText("paraRetirar", proximas.para_retirar || 0);
-        setText("outrosProblemas", proximas.outros_problemas || 0);
-        setText("totalResumoML", proximas.total || 0);
+        aplicarResumoML(proximas);
         console.log("[DEBUG] Resumo atualizado na página");
       } catch (error) {
         console.error("[ERRO] Ao carregar resumo ML:", error);
@@ -450,10 +470,13 @@
         if (status) params.set("status", status);
         if (prioridade) params.set("prioridade", prioridade);
 
-        devolucoes = await api(`/api/devolucoes?${params.toString()}`);
+        const [lista] = await Promise.all([
+          api(`/api/devolucoes?${params.toString()}`),
+          carregarResumoML(),
+        ]);
+        devolucoes = lista;
         aplicarFiltros();
-        renderUrgencias();
-        await carregarResumoML();
+        renderUrgencias({ usarResumoLocal: !resumoMlAtual });
         await carregarHistoricoIncompletos();
         if (selecionada) {
           const stillThere = devolucoes.find((item) => item.id === selecionada.id);
@@ -476,15 +499,18 @@
         button.textContent = "Sincronizando...";
       }
       try {
-        const result = await api("/api/devolucoes/sincronizar-ml", { method: "POST", body: "{}" });
-        ultimaSincronizacao = Date.now();
+        const result = await api("/api/devolucoes/sincronizar-ml", { method: "POST", body: "{}", timeoutMs: 90000 });
         await carregarTudo();
 
         const totalAtual = result.resumo?.total || result.total || 0;
         const novasCriadas = result.criadas || 0;
         const atualizadas = result.atualizadas || 0;
+        const traceCurto = result.trace_id ? ` Trace: ${result.trace_id.slice(0, 8)}.` : "";
 
-        await carregarResumoML();
+        if (result.resumo) {
+          aplicarResumoML(result.resumo);
+          renderUrgencias();
+        }
 
         // Notificar se há devoluções novas
         if (novasCriadas > 0) {
@@ -492,10 +518,12 @@
             ? "1 nova devolução"
             : `${novasCriadas} novas devoluções`;
           showNotification(`✨ ${mensagem}! Sincronizado com Mercado Livre`, {
-            body: `${novasCriadas} criadas, ${atualizadas} atualizadas`
+            body: `${novasCriadas} criadas, ${atualizadas} atualizadas.${traceCurto}`
           });
         } else if (!silent && (novasCriadas > 0 || atualizadas > 0)) {
-          showImportFeedback("Sincronizado com o Mercado Livre.", "success", `Total: ${totalAtual}.`);
+          showImportFeedback("Sincronizado com o Mercado Livre.", "success", `Total: ${totalAtual}.${traceCurto}`);
+        } else if (!silent) {
+          showImportFeedback("Sincronizado com o Mercado Livre.", "success", `Sem novas alteracoes. Total: ${totalAtual}.${traceCurto}`);
         }
 
         return result;
@@ -507,7 +535,7 @@
         syncInProgress = false;
         if (!silent) {
           button.disabled = false;
-          button.textContent = "Sincronizar ML";
+          button.textContent = "Atualizar ML";
         }
       }
     }
@@ -524,7 +552,13 @@
       renderListaFiltradaCentro();
     }
 
-    function renderUrgencias() {
+    function renderUrgencias({ usarResumoLocal = false } = {}) {
+      if (resumoMlAtual && !usarResumoLocal) {
+        setText("paraRevisao", resumoMlAtual.para_revisao || 0);
+        setText("paraRetirar", resumoMlAtual.para_retirar || 0);
+        setText("outrosProblemas", resumoMlAtual.outros_problemas || 0);
+        setText("totalResumoML", resumoMlAtual.total || 0);
+      }
       const revisao = devolucoes.filter(needsReview).length;
       const retirar = devolucoes.filter(needsPickup).length;
       const outros = devolucoes.filter(otherProblems).length;
@@ -533,10 +567,12 @@
       setText("orgTotal", retirar);
       setText("fullTotal", outros);
       setText("mediacaoTotal", devolucoes.filter(inMediation).length);
-      setText("paraRevisao", revisao);
-      setText("paraRetirar", retirar);
-      setText("outrosProblemas", outros);
-      setText("totalResumoML", total);
+      if (usarResumoLocal || !resumoMlAtual) {
+        setText("paraRevisao", revisao);
+        setText("paraRetirar", retirar);
+        setText("outrosProblemas", outros);
+        setText("totalResumoML", total);
+      }
       const titles = {
         revisao: "Para sua revisao",
         organica: "Para retirar no correio",
@@ -748,7 +784,7 @@
       await abrirDetalhe(id);
     }
 
-    async function abrirDetalhe(id) {
+    async function abrirDetalhe(id, target = "painel") {
       const [item, historico, checklist, evidencias, contestacoes] = await Promise.all([
         api(`/api/devolucoes/${id}`),
         api(`/api/devolucoes/${id}/historico`),
@@ -758,7 +794,7 @@
       ]);
       selecionada = item;
       renderLista();
-      document.getElementById("detalhe").innerHTML = `
+      const detalheHTML = `
         <div class="panel-title">
           <h2>${item.produto_nome}</h2>
           <span>${item.pedido_id}</span>
@@ -870,6 +906,15 @@
           </section>
         </div>
       `;
+      if (target === "modal") {
+        const modal = document.getElementById("modalPainelFlutuante");
+        setText("floatingPanelEyebrow", "Atendimento");
+        setText("floatingPanelTitle", item.produto_nome || "Devolucao");
+        document.getElementById("floatingPanelContent").innerHTML = detalheHTML;
+        if (!modal.open) modal.showModal();
+      } else {
+        document.getElementById("detalhe").innerHTML = detalheHTML;
+      }
       bindDetalhe();
     }
 
@@ -945,6 +990,75 @@
     document.getElementById("sincronizarMl").addEventListener("click", async () => {
       await sincronizarMercadoLivre();
     });
+    function bucketCardHTML(card) {
+      const pedido = card.pedido_id || card.pack_id || card.claim_id || "-";
+      const valor = money(card.valor_pago || 0);
+      const taxa = Number(card.taxa_venda || 0) > 0 ? ` · Taxa ${money(card.taxa_venda)}` : "";
+      const tipo = card.ml_tipo_logistica === "full_ml" ? "FULL" : "ORGANICA";
+      const motivo = card.motivo_label || card.reason_id || "-";
+      const imagem = card.produto_imagem || productImage({});
+      const due = card.due_date ? `<small class="due">Prazo ${new Date(card.due_date).toLocaleString("pt-BR")}</small>` : "";
+      const claimId = card.claim_id || "";
+      const mlUrl = claimId ? `https://www.mercadolivre.com.br/devolucoes/detalhes/${claimId}` : "#";
+      return `
+        <article class="floating-card">
+          <img src="${imagem}" alt="">
+          <b>#${pedido}</b>
+          <strong>${card.produto_nome || "Produto Mercado Livre"}</strong>
+          <small>${tipo} · ${motivo}</small>
+          <small>Pago ${valor}${taxa}</small>
+          ${due}
+          <span class="floating-card-actions">
+            <button type="button" data-import-pedido="${pedido}">Abrir fluxo</button>
+            <a href="${mlUrl}" target="_blank" rel="noopener">Ver detalhes ML</a>
+          </span>
+        </article>
+      `;
+    }
+
+    async function abrirPainelCardsBucket(bucket, titulo) {
+      const modal = document.getElementById("modalPainelFlutuante");
+      const content = document.getElementById("floatingPanelContent");
+      setText("floatingPanelEyebrow", "Atendimento");
+      setText("floatingPanelTitle", titulo || "Atendimento");
+      content.innerHTML = `<div class="floating-loading">Carregando ${titulo}...</div>`;
+      modal.showModal();
+      try {
+        const data = await api(`/api/devolucoes/cards?bucket=${encodeURIComponent(bucket)}`);
+        const cards = data.cards || [];
+        if (!cards.length) {
+          content.innerHTML = `<div class="empty compact"><h2>Nenhum item neste filtro</h2><p>Clique em Atualizar ML para recarregar o cache.</p></div>`;
+          return;
+        }
+        content.innerHTML = `<div class="floating-grid">${cards.map(bucketCardHTML).join("")}</div>`;
+        content.querySelectorAll("[data-import-pedido]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const pedidoId = button.dataset.importPedido;
+            if (!pedidoId) return;
+            button.disabled = true;
+            const original = button.textContent;
+            button.textContent = "Abrindo...";
+            try {
+              const result = await api("/api/pedidos/importar", { method: "POST", body: JSON.stringify({ pedido_id: pedidoId }) });
+              await carregarTudo();
+              if (result.devolucao?.id) {
+                await abrirDetalhe(result.devolucao.id, "modal");
+              } else {
+                modal.close();
+              }
+            } catch (error) {
+              showImportFeedback("Nao consegui importar o pedido.", "error", error.message);
+            } finally {
+              button.disabled = false;
+              button.textContent = original;
+            }
+          });
+        });
+      } catch (error) {
+        content.innerHTML = `<div class="empty compact"><h2>Nao consegui carregar</h2><p>${error.message}</p></div>`;
+      }
+    }
+
     function abrirPainelFlutuante(tipo, itens = null, titulo = "") {
       const modal = document.getElementById("modalPainelFlutuante");
       const content = document.getElementById("floatingPanelContent");
@@ -1208,9 +1322,9 @@
       const payload = {
         produto_confere: document.querySelector("input[name='inspecao_confere']")?.checked || false,
         embalagem_integra: document.querySelector("input[name='inspecao_embalagem']")?.checked || false,
-        possui_sinais_de_uso: !document.querySelector("input[name='inspecao_sinais_uso']")?.checked || false,
-        item_quebrado: !document.querySelector("input[name='inspecao_quebrado']")?.checked || false,
-        faltando_pecas: !document.querySelector("input[name='inspecao_pecas']")?.checked || false,
+        possui_sinais_de_uso: !(document.querySelector("input[name='inspecao_sinais_uso']")?.checked || false),
+        item_quebrado: !(document.querySelector("input[name='inspecao_quebrado']")?.checked || false),
+        faltando_pecas: !(document.querySelector("input[name='inspecao_pecas']")?.checked || false),
         motivo_confere: document.querySelector("input[name='motivo_confere']")?.checked || false,
         embalagem_rasgada: document.querySelector("input[name='embalagem_rasgada']")?.checked || false,
         produto_amassado: document.querySelector("input[name='produto_amassado']")?.checked || false,
@@ -1308,13 +1422,13 @@
         selecionada = { id: itemId };
         itemEmConferencia = selecionada;
 
-        const etapaAtual = checklist.etapa_atual || 1;
-        mostrarEtapa(etapaAtual);
+        const etapaSalva = checklist.etapa_checklist_atual || 1;
+        mostrarEtapa(etapaSalva);
 
         // Restaurar dados salvos
-        if (checklist.conteudo_progresso) {
+        if (checklist.conteudo_progresso_checklist) {
           try {
-            const conteudo = JSON.parse(checklist.conteudo_progresso);
+            const conteudo = JSON.parse(checklist.conteudo_progresso_checklist);
             document.querySelector("input[name='inspecao_confere']").checked = conteudo.inspecao_confere || false;
             document.querySelector("input[name='inspecao_embalagem']").checked = conteudo.inspecao_embalagem || false;
             document.querySelector("input[name='inspecao_sinais_uso']").checked = conteudo.inspecao_sinais_uso || false;
@@ -1343,13 +1457,19 @@
       await carregarTudo();
     });
     document.querySelectorAll(".summary-item[data-urgency]").forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         urgencyFilter = button.dataset.urgency || "revisao";
         document.querySelectorAll(".summary-item").forEach((item) => item.classList.remove("active"));
         button.classList.add("active");
         renderUrgencias();
         aplicarFiltros();
-        abrirPainelFlutuante("painelTodasDevolucoes", filtradas, document.getElementById("filteredTitle").textContent);
+        const bucket = button.dataset.bucket;
+        const titulo = button.querySelector(".item-label")?.textContent?.trim() || "Atendimento";
+        if (bucket) {
+          await abrirPainelCardsBucket(bucket, titulo);
+        } else {
+          abrirPainelFlutuante("painelTodasDevolucoes", filtradas, document.getElementById("filteredTitle").textContent);
+        }
       });
     });
     // Registrar event listeners para filtros
@@ -1379,12 +1499,6 @@
         console.error("[ERRO] Ao carregar tudo:", error);
         alert(error.message);
       });
-      sincronizarMercadoLivre({ silent: true });
-      window.setInterval(() => {
-        if (Date.now() - ultimaSincronizacao >= SYNC_INTERVAL_MS) {
-          sincronizarMercadoLivre({ silent: true });
-        }
-      }, 30000);
     } catch (e) {
       console.error("[ERRO] Ao chamar carregarTudo:", e);
     }
