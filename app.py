@@ -21,7 +21,24 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_PATH = ROOT_DIR / ".env"
 DB_PATH = ROOT_DIR / "data" / "devolucoes.sqlite"
 UPLOAD_DIR = ROOT_DIR / "uploads"
-ML_CLASSIFIER_VERSION = "actions-v3"
+ML_CLASSIFIER_VERSION = "actions-v14"
+ML_CLOSED_TOUCH_GAP_HOURS = 24
+
+
+def claim_benefited_complainant_only(claim: dict) -> bool:
+    resolution = claim.get("resolution") or {}
+    benefited = resolution.get("benefited") or []
+    return list(benefited) == ["complainant"]
+
+
+def claim_touched_after_resolution(claim: dict) -> bool:
+    resolution = claim.get("resolution") or {}
+    res_date = parse_ml_datetime(resolution.get("date_created"))
+    last_updated = parse_ml_datetime(claim.get("last_updated"))
+    if not res_date or not last_updated:
+        return False
+    gap = last_updated - res_date
+    return gap >= timedelta(hours=ML_CLOSED_TOUCH_GAP_HOURS)
 ML_ENRICHMENT_VERSION = "enrich-v1"
 
 MOTIVO_LABELS = {
@@ -575,7 +592,12 @@ def claim_has_listed_seller_action(claim: dict) -> bool:
     review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
     if actions.intersection(review_actions):
         return True
-    return claim.get("status") == "opened" and "send_message_to_mediator" in actions
+    status = claim.get("status")
+    if status == "opened" and "send_message_to_mediator" in actions:
+        return True
+    if status == "closed" and claim_benefited_complainant_only(claim) and claim_touched_after_resolution(claim):
+        return True
+    return False
 
 
 def review_due_date(claim: dict) -> str | None:
@@ -1423,10 +1445,20 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
     reason = str(claim.get("reason_id") or "")
 
     review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
-    if actions.intersection(review_actions):
+    has_review = bool(actions.intersection(review_actions))
+    return_related = return_info.get("related_entities") or []
+    already_reviewed = "reviews" in return_related
+    if has_review and not already_reviewed:
         return "para_revisao", "seller_available_action:return_review"
     if "send_message_to_mediator" in actions:
         return "outros_problemas", "seller_available_action:send_message_to_mediator"
+    if (
+        str(claim.get("status") or "") == "closed"
+        and claim_benefited_complainant_only(claim)
+        and claim_touched_after_resolution(claim)
+        and return_status == "delivered"
+    ):
+        return "outros_problemas", "closed_touched_with_return_delivered"
     if str(claim.get("type") or "") == "mediations" or str(claim.get("stage") or "") == "dispute":
         return "fora_da_fila", "mediation_without_return_review_action"
     if return_status == "label_generated" and reason == "PDD9967":

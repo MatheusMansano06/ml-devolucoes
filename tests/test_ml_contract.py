@@ -212,6 +212,52 @@ class MercadoLivreContractTests(unittest.TestCase):
         self.assertEqual(meta["mandatory"], 0)
         self.assertEqual(meta["due_date"], "2026-06-01T18:00:00Z")
 
+    def test_para_revisao_requires_no_prior_reviews(self):
+        claim = {
+            "id": "c-rev",
+            "status": "opened",
+            "stage": "claim",
+            "type": "returns",
+            "players": [{"type": "respondent", "available_actions": [
+                {"action": "return_review_unified_ok", "mandatory": True, "due_date": "2026-06-01T00:00:00Z"},
+            ]}],
+        }
+        bucket_virgin, _ = app.classify_ml_live_queue_claim(claim, {"status": "delivered", "shipment_status": "", "related_entities": []})
+        self.assertEqual(bucket_virgin, "para_revisao")
+
+        bucket_reviewed, _ = app.classify_ml_live_queue_claim(claim, {"status": "delivered", "shipment_status": "", "related_entities": ["reviews"]})
+        self.assertNotEqual(bucket_reviewed, "para_revisao")
+
+    def test_classifier_accepts_closed_touched_with_return_delivered(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        res_date = (now - timedelta(days=5)).isoformat()
+        last_updated_recent = (now - timedelta(hours=2)).isoformat()
+        last_updated_same = (now - timedelta(days=5)).isoformat()
+
+        claim_vp = {
+            "id": "c-vp", "status": "closed", "stage": "dispute", "type": "mediations",
+            "last_updated": last_updated_recent,
+            "resolution": {"reason": "item_returned", "benefited": ["complainant"], "date_created": res_date},
+            "players": [{"type": "respondent", "available_actions": []}],
+        }
+        self.assertTrue(app.claim_has_listed_seller_action(claim_vp))
+        bucket, rule = app.classify_ml_live_queue_claim(claim_vp, {"status": "delivered", "shipment_status": ""})
+        self.assertEqual(bucket, "outros_problemas")
+        self.assertEqual(rule, "closed_touched_with_return_delivered")
+
+        bucket_fp, _ = app.classify_ml_live_queue_claim(claim_vp, {"status": "shipped", "shipment_status": ""})
+        self.assertNotEqual(bucket_fp, "outros_problemas")
+
+        claim_fp_just_resolved = dict(claim_vp, id="c-fp1", last_updated=last_updated_same, resolution={"reason": "item_returned", "benefited": ["complainant"], "date_created": last_updated_same})
+        self.assertFalse(app.claim_has_listed_seller_action(claim_fp_just_resolved))
+
+        claim_fp_both = dict(claim_vp, id="c-fp2", resolution={"reason": "coverage_decision", "benefited": ["respondent", "complainant"], "date_created": res_date})
+        self.assertFalse(app.claim_has_listed_seller_action(claim_fp_both))
+
+        claim_fp_respondent = dict(claim_vp, id="c-fp3", resolution={"reason": "no_bpp", "benefited": ["respondent"], "date_created": res_date})
+        self.assertFalse(app.claim_has_listed_seller_action(claim_fp_respondent))
+
     def test_apply_ml_queue_window_restores_previously_demoted_items(self):
         rows = [
             {"claim_id": "c1", "bucket": "outros_problemas", "regra": "seller_available_action:send_message_to_mediator", "last_updated": "2026-05-26T10:00:00Z"},
