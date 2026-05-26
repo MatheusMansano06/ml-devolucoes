@@ -212,6 +212,25 @@ class MercadoLivreContractTests(unittest.TestCase):
         self.assertEqual(meta["mandatory"], 0)
         self.assertEqual(meta["due_date"], "2026-06-01T18:00:00Z")
 
+    def test_mediator_requires_return_delivered(self):
+        claim = {
+            "id": "c-med",
+            "status": "opened",
+            "stage": "dispute",
+            "type": "mediations",
+            "players": [{"type": "respondent", "available_actions": [
+                {"action": "send_message_to_mediator", "mandatory": False, "due_date": None},
+            ]}],
+        }
+        bucket_ok, _ = app.classify_ml_live_queue_claim(claim, {"status": "delivered", "shipment_status": ""})
+        self.assertEqual(bucket_ok, "outros_problemas")
+
+        bucket_expired, _ = app.classify_ml_live_queue_claim(claim, {"status": "expired", "shipment_status": "cancelled"})
+        self.assertNotEqual(bucket_expired, "outros_problemas")
+
+        bucket_empty, _ = app.classify_ml_live_queue_claim(claim, {"status": "", "shipment_status": ""})
+        self.assertNotEqual(bucket_empty, "outros_problemas")
+
     def test_para_revisao_requires_no_prior_reviews(self):
         claim = {
             "id": "c-rev",
@@ -248,6 +267,9 @@ class MercadoLivreContractTests(unittest.TestCase):
 
         bucket_fp, _ = app.classify_ml_live_queue_claim(claim_vp, {"status": "shipped", "shipment_status": ""})
         self.assertNotEqual(bucket_fp, "outros_problemas")
+
+        bucket_reviewed, _ = app.classify_ml_live_queue_claim(claim_vp, {"status": "delivered", "shipment_status": "", "related_entities": ["reviews"]})
+        self.assertNotEqual(bucket_reviewed, "outros_problemas")
 
         claim_fp_just_resolved = dict(claim_vp, id="c-fp1", last_updated=last_updated_same, resolution={"reason": "item_returned", "benefited": ["complainant"], "date_created": last_updated_same})
         self.assertFalse(app.claim_has_listed_seller_action(claim_fp_just_resolved))

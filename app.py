@@ -21,7 +21,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_PATH = ROOT_DIR / ".env"
 DB_PATH = ROOT_DIR / "data" / "devolucoes.sqlite"
 UPLOAD_DIR = ROOT_DIR / "uploads"
-ML_CLASSIFIER_VERSION = "actions-v14"
+ML_CLASSIFIER_VERSION = "actions-v17"
 ML_CLOSED_TOUCH_GAP_HOURS = 24
 
 
@@ -1451,19 +1451,22 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
     if has_review and not already_reviewed:
         return "para_revisao", "seller_available_action:return_review"
     if "send_message_to_mediator" in actions:
-        return "outros_problemas", "seller_available_action:send_message_to_mediator"
+        if return_status == "delivered":
+            return "outros_problemas", "seller_available_action:send_message_to_mediator"
+        return "fora_da_fila", f"mediator_return_not_delivered:{return_status}"
     if (
         str(claim.get("status") or "") == "closed"
         and claim_benefited_complainant_only(claim)
         and claim_touched_after_resolution(claim)
         and return_status == "delivered"
+        and not already_reviewed
     ):
         return "outros_problemas", "closed_touched_with_return_delivered"
     if str(claim.get("type") or "") == "mediations" or str(claim.get("stage") or "") == "dispute":
         return "fora_da_fila", "mediation_without_return_review_action"
     if return_status == "label_generated" and reason == "PDD9967":
         return "para_retirar", "return_label_generated_with_pickup_reason"
-    if return_status in {"label_generated", "shipped", "in_return", "processing"}:
+    if str(claim.get("status") or "") == "opened" and return_status in {"label_generated", "shipped", "in_return", "processing"}:
         return "outros_problemas", f"return_in_progress:{return_status}:{shipment_status}:{destination}"
     return "fora_da_fila", f"no_matching_queue_rule:{return_status}:{shipment_status}"
 
