@@ -597,7 +597,7 @@ def claim_has_action_with_due_date(claim: dict, action_name: str) -> bool:
 
 
 def has_return_review_action(claim: dict) -> bool:
-    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    review_actions = {"return_review_ok", "return_review_fail", "return_review_unified_ok", "return_review_unified_fail"}
     return any(action.get("action") in review_actions for action in claim_available_actions(claim))
 
 
@@ -611,7 +611,7 @@ def action_names(claim: dict) -> list[str]:
 
 def claim_has_listed_seller_action(claim: dict) -> bool:
     actions = set(action_names(claim))
-    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    review_actions = {"return_review_ok", "return_review_fail", "return_review_unified_ok", "return_review_unified_fail"}
     if actions.intersection(review_actions):
         return True
     status = claim.get("status")
