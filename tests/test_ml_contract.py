@@ -212,6 +212,22 @@ class MercadoLivreContractTests(unittest.TestCase):
         self.assertEqual(meta["mandatory"], 0)
         self.assertEqual(meta["due_date"], "2026-06-01T18:00:00Z")
 
+    def test_claim_pending_requires_return_delivered(self):
+        claim = {
+            "id": "c-pend", "status": "opened", "stage": "claim", "type": "returns",
+            "players": [{"type": "respondent", "available_actions": [
+                {"action": "open_dispute"}, {"action": "refund"}, {"action": "send_message_to_complainant"},
+            ]}],
+        }
+        bucket_ok, _ = app.classify_ml_live_queue_claim(claim, {"status": "delivered", "shipment_status": "", "related_entities": []})
+        self.assertEqual(bucket_ok, "outros_problemas")
+
+        bucket_label, _ = app.classify_ml_live_queue_claim(claim, {"status": "label_generated", "shipment_status": "ready_to_ship"})
+        self.assertNotEqual(bucket_label, "outros_problemas")
+
+        bucket_reviewed, _ = app.classify_ml_live_queue_claim(claim, {"status": "delivered", "related_entities": ["reviews"]})
+        self.assertNotEqual(bucket_reviewed, "outros_problemas")
+
     def test_mediator_requires_return_delivered(self):
         claim = {
             "id": "c-med",

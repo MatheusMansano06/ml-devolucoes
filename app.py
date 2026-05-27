@@ -21,7 +21,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_PATH = ROOT_DIR / ".env"
 DB_PATH = ROOT_DIR / "data" / "devolucoes.sqlite"
 UPLOAD_DIR = ROOT_DIR / "uploads"
-ML_CLASSIFIER_VERSION = "actions-v17"
+ML_CLASSIFIER_VERSION = "actions-v18"
 ML_CLOSED_TOUCH_GAP_HOURS = 24
 
 
@@ -594,6 +594,8 @@ def claim_has_listed_seller_action(claim: dict) -> bool:
         return True
     status = claim.get("status")
     if status == "opened" and "send_message_to_mediator" in actions:
+        return True
+    if status == "opened" and actions.intersection({"open_dispute", "send_message_to_complainant", "refund"}):
         return True
     if status == "closed" and claim_benefited_complainant_only(claim) and claim_touched_after_resolution(claim):
         return True
@@ -1454,6 +1456,11 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
         if return_status == "delivered":
             return "outros_problemas", "seller_available_action:send_message_to_mediator"
         return "fora_da_fila", f"mediator_return_not_delivered:{return_status}"
+    pending_actions = {"open_dispute", "send_message_to_complainant", "refund"}
+    if str(claim.get("status") or "") == "opened" and actions.intersection(pending_actions):
+        if return_status == "delivered" and not already_reviewed:
+            return "outros_problemas", "seller_available_action:claim_pending"
+        return "fora_da_fila", f"claim_pending_not_eligible:return={return_status}:reviewed={already_reviewed}"
     if (
         str(claim.get("status") or "") == "closed"
         and claim_benefited_complainant_only(claim)
