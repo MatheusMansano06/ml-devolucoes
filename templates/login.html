@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entrar - Devolucoes ML</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-card">
+      <div class="auth-brand">
+        <div>
+          <p class="eyebrow">Mercado Livre</p>
+          <h1>Gerenciar Devolucoes</h1>
+        </div>
+      </div>
+
+      {% if error %}
+        <div class="notice error">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" class="auth-form">
+        <label>PIN de acesso</label>
+        <input type="hidden" name="pin" id="pin-value">
+        <div class="pin-display" aria-label="PIN digitado">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+
+        <div class="numpad" aria-label="Teclado numerico">
+          <button type="button" data-number="1">1</button>
+          <button type="button" data-number="2">2</button>
+          <button type="button" data-number="3">3</button>
+          <button type="button" data-number="4">4</button>
+          <button type="button" data-number="5">5</button>
+          <button type="button" data-number="6">6</button>
+          <button type="button" data-number="7">7</button>
+          <button type="button" data-number="8">8</button>
+          <button type="button" data-number="9">9</button>
+          <button type="button" data-action="clear">Limpar</button>
+          <button type="button" data-number="0">0</button>
+          <button type="button" data-action="back">Apagar</button>
+        </div>
+
+        <button type="submit">Entrar</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    let pin = "";
+    const hiddenPin = document.getElementById("pin-value");
+    const dots = [...document.querySelectorAll(".pin-display span")];
+    const updatePin = () => {
+      hiddenPin.value = pin;
+      dots.forEach((dot, index) => {
+        dot.classList.toggle("filled", index < pin.length);
+      });
+    };
+
+    document.querySelectorAll(".numpad button").forEach((button) => {
+      button.addEventListener("click", () => {
+        const number = button.dataset.number;
+        const action = button.dataset.action;
+        if (number && pin.length < 4) pin += number;
+        if (action === "back") pin = pin.slice(0, -1);
+        if (action === "clear") pin = "";
+        updatePin();
+      });
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (/^\d$/.test(event.key) && pin.length < 4) pin += event.key;
+      if (event.key === "Backspace") pin = pin.slice(0, -1);
+      if (event.key === "Escape") pin = "";
+      updatePin();
+    });
+  </script>
+</body>
+</html>
