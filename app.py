@@ -272,6 +272,7 @@ def init_database() -> None:
             "ml_refund_at": "TEXT DEFAULT ''",
             "ml_seller_status": "TEXT DEFAULT ''",
             "ml_seller_reason": "TEXT DEFAULT ''",
+            "ml_tarifa_devolucao": "REAL DEFAULT 0",
             "ml_product_condition": "TEXT DEFAULT ''",
             "ml_return_reviews": "TEXT DEFAULT '[]'",
         }
@@ -566,6 +567,18 @@ def map_ml_status(claim: dict, retorno: dict | None) -> str:
     if "dispute" in stage:
         return "contestacao_aberta"
     return "aguardando_produto"
+
+
+def extract_tarifa_devolucao(retorno: dict | None) -> float:
+    """Extrai o valor real de tarifa de devolução do payload do return do ML."""
+    if not retorno:
+        return 0.0
+    charges = retorno.get("charges") or {}
+    if isinstance(charges, dict):
+        for charge_type, charge_value in charges.items():
+            if charge_type and "return" in str(charge_type).lower():
+                return float(charge_value or 0)
+    return 0.0
 
 
 def claim_available_actions(claim: dict) -> list[dict]:
@@ -952,6 +965,7 @@ def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
         "chegada_status": "",
         "mediacao_mensagem": "",
         "ml_ativo": 1 if proxima_atender else 0,
+        "ml_tarifa_devolucao": extract_tarifa_devolucao(retorno),
         **financials,
     }
 
@@ -2037,6 +2051,7 @@ def upsert_ml_devolucao(item: dict) -> str:
         "ml_seller_reason",
         "ml_product_condition",
         "ml_return_reviews",
+        "ml_tarifa_devolucao",
     ]
     item = {**item, "ultima_sincronizacao_ml": now_iso(), "ml_ativo": int(item.get("ml_ativo", 1))}
     with db() as conn:

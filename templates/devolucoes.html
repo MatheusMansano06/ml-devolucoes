@@ -1754,14 +1754,14 @@
           const mesAnoItem = `${anoItem}-${mesItem}`;
           if (mesAnoItem !== mesFiltro) return false;
 
-          const temTarifa = Number(item.ml_taxa_venda || 0) > 0;
+          const temTarifa = Number(item.ml_tarifa_devolucao || 0) > 0;
           if (statusFiltro === "com-desconto") return temTarifa;
           if (statusFiltro === "sem-desconto") return !temTarifa;
           return true;
         });
 
-        const totalTarifas = itensRenderizar.reduce((sum, item) => sum + (Number(item.ml_taxa_venda || 0)), 0);
-        const itensComTarifa = itensRenderizar.filter((item) => Number(item.ml_taxa_venda || 0) > 0);
+        const totalTarifas = itensRenderizar.reduce((sum, item) => sum + (Number(item.ml_tarifa_devolucao || 0)), 0);
+        const itensComTarifa = itensRenderizar.filter((item) => Number(item.ml_tarifa_devolucao || 0) > 0);
         const mediaTarifa = itensComTarifa.length > 0 ? totalTarifas / itensComTarifa.length : 0;
 
         setText("metricaTotalTarifas", new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalTarifas));
@@ -1769,15 +1769,15 @@
         setText("metricaMediaTarifa", new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(mediaTarifa));
 
         const detalhesHTML = itensRenderizar.map((item) => {
-          const temTarifa = Number(item.ml_taxa_venda || 0) > 0;
-          const valorTarifa = Number(item.ml_taxa_venda || 0);
+          const temTarifa = Number(item.ml_tarifa_devolucao || 0) > 0;
+          const valorTarifa = Number(item.ml_tarifa_devolucao || 0);
           return `
-            <div class="metricas-item ${temTarifa ? 'com-desconto' : 'sem-desconto'}">
+            <div class="metricas-item">
               <div class="metricas-item-info">
                 <span class="metrica-item-id" title="${mlPrimaryId(item)}">${mlPrimaryId(item)}</span>
                 <span class="metrica-item-nome">${item.produto_nome}</span>
               </div>
-              <span class="metrica-item-valor">${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valorTarifa)}</span>
+              <span class="metrica-item-valor ${temTarifa ? 'com-desconto' : 'sem-desconto'}">${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valorTarifa)}</span>
               <button class="btn-ver-detalhes" data-item-id="${item.id}" title="Ver detalhes da devolução">
                 <span>Ver detalhes</span>
               </button>

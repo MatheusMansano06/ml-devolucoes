@@ -5538,19 +5538,6 @@ body.meli-page {
   font-size: 13px;
 }
 
-.metricas-item.com-desconto {
-  background: #f0fdf4;
-  border-color: #dcfce7;
-  border-left: 4px solid #16a34a;
-}
-
-.metricas-item.sem-desconto {
-  background: #fef3c7;
-  border-color: #fde68a;
-  border-left: 4px solid #eab308;
-  opacity: 0.7;
-}
-
 .metricas-item-info {
   display: flex;
   flex-direction: column;
@@ -5576,10 +5563,14 @@ body.meli-page {
 }
 
 .metrica-item-valor {
-  font-weight: 600;
-  color: #0d9488;
+  font-weight: 700;
+  color: #0f172a;
   text-align: right;
   white-space: nowrap;
+}
+
+.metrica-item-valor.com-desconto {
+  color: #dc2626;
 }
 
 .btn-ver-detalhes {
