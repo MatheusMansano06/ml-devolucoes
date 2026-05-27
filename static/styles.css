@@ -4062,10 +4062,12 @@ body.meli-page {
 .summary-item.card-green .item-count { color: #059669; }
 .summary-item.card-orange .item-count { color: #ea580c; }
 .summary-item.card-purple .item-count { color: #7e22ce; }
+.summary-item.card-teal .item-count { color: #0d9488; }
 .summary-item.card-blue .item-tag { background: #e8efff; color: #2563eb; }
 .summary-item.card-green .item-tag { background: #e7f9ef; color: #059669; }
 .summary-item.card-orange .item-tag { background: #fff2e2; color: #ea580c; }
 .summary-item.card-purple .item-tag { background: #f2e9ff; color: #7e22ce; }
+.summary-item.card-teal .item-tag { background: #e0fdfb; color: #0d9488; }
 
 .pending-card {
   display: grid;
@@ -5419,4 +5421,97 @@ body.meli-page {
   margin-top: 0 !important;
   display: grid;
   gap: 12px !important;
+}
+
+.metricas-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 0;
+}
+
+.metricas-container h3 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #0f172a;
+  margin: 0;
+}
+
+.metricas-container h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #475569;
+  margin: 0 0 12px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metricas-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.metrica-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.metrica-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metrica-valor {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0d9488;
+}
+
+.metricas-detalhes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metricas-item {
+  display: grid;
+  grid-template-columns: 80px 1fr 120px;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f1f5f9;
+  font-size: 13px;
+}
+
+.metrica-item-id {
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metrica-item-nome {
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metrica-item-valor {
+  font-weight: 600;
+  color: #0d9488;
+  text-align: right;
 }

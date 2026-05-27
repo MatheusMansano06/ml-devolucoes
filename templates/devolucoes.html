@@ -99,12 +99,6 @@
               <span class="item-label">Para sua revisão</span>
               <small class="item-tag">Atenção necessária</small>
             </button>
-            <button type="button" class="summary-item card-green" data-urgency="organica" data-bucket="para_revisao">
-              <span class="summary-icon summary-icon-fast" aria-hidden="true"></span>
-              <strong class="item-count">1</strong>
-              <span class="item-label">Para sua revisão</span>
-              <small class="item-tag">Revisão rápida</small>
-            </button>
             <button type="button" class="summary-item card-orange" data-urgency="organica" data-bucket="para_retirar">
               <span class="summary-icon summary-icon-mail" aria-hidden="true"></span>
               <strong class="item-count" id="paraRetirar">0</strong>
@@ -116,6 +110,12 @@
               <strong class="item-count" id="outrosProblemas">0</strong>
               <span class="item-label">Outros problemas</span>
               <small class="item-tag">Demais pendências</small>
+            </button>
+            <button type="button" class="summary-item card-teal" id="metricaTarifas" style="cursor: pointer;">
+              <span class="summary-icon summary-icon-chart" aria-hidden="true"></span>
+              <strong class="item-count" id="totalTarifas">R$ 0,00</strong>
+              <span class="item-label">Tarifa de devolução</span>
+              <small class="item-tag">Valor descontado</small>
             </button>
           </div>
         </div>
@@ -634,6 +634,9 @@
       setText("orgTotal", retirar);
       setText("fullTotal", outros);
       setText("mediacaoTotal", devolucoes.filter(inMediation).length);
+      const totalTarifas = devolucoes.reduce((sum, item) => sum + (Number(item.ml_taxa_venda || 0)), 0);
+      const tarifasFormatado = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalTarifas);
+      setText("totalTarifas", tarifasFormatado);
       if (usarResumoLocal || !resumoMlAtual) {
         setText("paraRevisao", revisao);
         setText("paraRetirar", retirar);
@@ -1690,6 +1693,48 @@
           abrirPainelFlutuante("painelTodasDevolucoes", filtradas, document.getElementById("filteredTitle").textContent);
         }
       });
+    });
+    document.getElementById("metricaTarifas")?.addEventListener("click", () => {
+      const metricasContent = `
+        <div class="metricas-container">
+          <h3>Métricas de Devoluções</h3>
+          <div class="metricas-grid">
+            <article class="metrica-card">
+              <span class="metrica-label">Total em Tarifas</span>
+              <span class="metrica-valor" id="metricaTotalTarifas">R$ 0,00</span>
+            </article>
+            <article class="metrica-card">
+              <span class="metrica-label">Itens com Tarifa</span>
+              <span class="metrica-valor" id="metricaTotalItens">0</span>
+            </article>
+            <article class="metrica-card">
+              <span class="metrica-label">Tarifa Média</span>
+              <span class="metrica-valor" id="metricaMediaTarifa">R$ 0,00</span>
+            </article>
+          </div>
+          <div class="metricas-detalhes">
+            <h4>Detalhamento por Item</h4>
+            <div id="metricasDetalhamento" style="max-height: 400px; overflow-y: auto;"></div>
+          </div>
+        </div>
+      `;
+      document.getElementById("floatingPanelContent").innerHTML = metricasContent;
+      setText("floatingPanelTitle", "Análise de Tarifas");
+      document.getElementById("modalPainelFlutuante").showModal();
+      const itensComTarifa = devolucoes.filter((item) => Number(item.ml_taxa_venda || 0) > 0);
+      const totalTarifas = itensComTarifa.reduce((sum, item) => sum + Number(item.ml_taxa_venda || 0), 0);
+      const mediaTarifa = itensComTarifa.length > 0 ? totalTarifas / itensComTarifa.length : 0;
+      setText("metricaTotalTarifas", new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalTarifas));
+      setText("metricaTotalItens", itensComTarifa.length);
+      setText("metricaMediaTarifa", new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(mediaTarifa));
+      const detalhesHTML = itensComTarifa.map((item) => `
+        <div class="metricas-item">
+          <span class="metrica-item-id">${mlPrimaryId(item)}</span>
+          <span class="metrica-item-nome">${item.produto_nome}</span>
+          <span class="metrica-item-valor">${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(item.ml_taxa_venda || 0))}</span>
+        </div>
+      `).join('');
+      document.getElementById("metricasDetalhamento").innerHTML = detalhesHTML || '<p style="text-align: center; color: #999;">Nenhum item com tarifa de devolução</p>';
     });
     // Registrar event listeners para filtros
     try {
