@@ -1542,7 +1542,7 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
         ):
             return "para_retirar", "seller_pickup_review_due:return_review_ok"
 
-    review_actions = {"return_review_unified_ok", "return_review_unified_fail"}
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail", "return_review_ok", "return_review_fail"}
     has_review = bool(actions.intersection(review_actions))
     return_related = return_info.get("related_entities") or []
     already_reviewed = "reviews" in return_related
@@ -2527,17 +2527,39 @@ def api_sincronizar_ml():
             started_at=sync_started,
         )
 
+        with db() as conn:
+            bucket_breakdown = {}
+            for bucket in ["para_revisao", "para_retirar", "outros_problemas", "fora_da_fila", "erro"]:
+                count = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM ml_claim_classifications WHERE active = 1 AND bucket = ?",
+                    [bucket],
+                ).fetchone()
+                bucket_breakdown[bucket] = count["cnt"] if count else 0
+
+        total_declared_ml = sum(int(value or 0) for value in cache_result["declarados"].values())
+        total_found = bucket_breakdown.get("para_revisao", 0) + bucket_breakdown.get("para_retirar", 0) + bucket_breakdown.get("outros_problemas", 0)
+        missing = total_declared_ml - total_found
+
         return jsonify(
             {
                 "mensagem": "Sincronizacao concluida",
                 "sync_run_id": sync_run_id,
                 "trace_id": trace_id,
-                "total_declarado_ml": sum(int(value or 0) for value in cache_result["declarados"].values()),
+                "total_declarado_ml": total_declared_ml,
                 "total": resumo["total"],
                 "criadas": 0,
                 "atualizadas": cache_result["cache_misses"],
                 "erros": cache_result["erros"],
                 "resumo": resumo,
+                "debug": {
+                    "para_revisao": bucket_breakdown.get("para_revisao", 0),
+                    "para_retirar": bucket_breakdown.get("para_retirar", 0),
+                    "outros_problemas": bucket_breakdown.get("outros_problemas", 0),
+                    "fora_da_fila": bucket_breakdown.get("fora_da_fila", 0),
+                    "total_encontrados": cache_result["inspecionados"],
+                    "missing_items": missing,
+                    "missing_em_fora_da_fila": bucket_breakdown.get("fora_da_fila", 0),
+                },
             }
         )
     except Exception as exc:
