@@ -1122,7 +1122,10 @@ def ml_review_locked_item(item: dict | sqlite3.Row) -> bool:
         or any(key in return_status for key in review_keywords)
         or any(key in seller_status for key in review_keywords)
     )
-    return logistic == "full_ml" or has_review_signal
+    stage = str(get("ml_stage", "") or "").lower()
+    ml_status = str(get("ml_status", "") or "").lower()
+    is_stage_claim_opened = stage == "claim" and ml_status == "opened"
+    return logistic == "full_ml" or has_review_signal or is_stage_claim_opened
 
 
 def resumo_from_items(items: list[dict | sqlite3.Row], fonte: str) -> dict:
