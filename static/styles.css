@@ -5446,6 +5446,49 @@ body.meli-page {
   letter-spacing: 0.05em;
 }
 
+.metricas-filtros {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 16px;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 16px;
+}
+
+.filtro-grupo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filtro-grupo label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filtro-grupo input[type="month"],
+.filtro-grupo select {
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: white;
+  font-size: 13px;
+  color: #0f172a;
+  font-family: inherit;
+}
+
+.filtro-grupo input[type="month"]:focus,
+.filtro-grupo select:focus {
+  outline: none;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
+}
+
 .metricas-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -5493,6 +5536,19 @@ body.meli-page {
   border-radius: 8px;
   background: #f1f5f9;
   font-size: 13px;
+}
+
+.metricas-item.com-desconto {
+  background: #f0fdf4;
+  border-color: #dcfce7;
+  border-left: 4px solid #16a34a;
+}
+
+.metricas-item.sem-desconto {
+  background: #fef3c7;
+  border-color: #fde68a;
+  border-left: 4px solid #eab308;
+  opacity: 0.7;
 }
 
 .metricas-item-info {
