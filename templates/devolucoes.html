@@ -1729,12 +1729,27 @@
       setText("metricaMediaTarifa", new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(mediaTarifa));
       const detalhesHTML = itensComTarifa.map((item) => `
         <div class="metricas-item">
-          <span class="metrica-item-id">${mlPrimaryId(item)}</span>
-          <span class="metrica-item-nome">${item.produto_nome}</span>
+          <div class="metricas-item-info">
+            <span class="metrica-item-id" title="${mlPrimaryId(item)}">${mlPrimaryId(item)}</span>
+            <span class="metrica-item-nome">${item.produto_nome}</span>
+          </div>
           <span class="metrica-item-valor">${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(item.ml_taxa_venda || 0))}</span>
+          <button class="btn-ver-detalhes" data-item-id="${item.id}" title="Ver detalhes da devolução">
+            <span>Ver detalhes</span>
+          </button>
         </div>
       `).join('');
       document.getElementById("metricasDetalhamento").innerHTML = detalhesHTML || '<p style="text-align: center; color: #999;">Nenhum item com tarifa de devolução</p>';
+      document.querySelectorAll(".btn-ver-detalhes").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const itemId = btn.dataset.itemId;
+          const item = devolucoes.find((d) => d.id === Number(itemId));
+          if (item) {
+            document.getElementById("modalPainelFlutuante").close();
+            await abrirDetalhe(Number(itemId));
+          }
+        });
+      });
     });
     // Registrar event listeners para filtros
     try {

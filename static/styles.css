@@ -5485,7 +5485,7 @@ body.meli-page {
 
 .metricas-item {
   display: grid;
-  grid-template-columns: 80px 1fr 120px;
+  grid-template-columns: 1fr auto auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
@@ -5495,9 +5495,17 @@ body.meli-page {
   font-size: 13px;
 }
 
+.metricas-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 .metrica-item-id {
-  font-weight: 600;
+  font-weight: 700;
   color: #0f172a;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5505,6 +5513,7 @@ body.meli-page {
 
 .metrica-item-nome {
   color: #475569;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5514,4 +5523,23 @@ body.meli-page {
   font-weight: 600;
   color: #0d9488;
   text-align: right;
+  white-space: nowrap;
+}
+
+.btn-ver-detalhes {
+  padding: 6px 12px;
+  border: 1px solid #0d9488;
+  border-radius: 6px;
+  background: white;
+  color: #0d9488;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn-ver-detalhes:hover {
+  background: #0d9488;
+  color: white;
 }
