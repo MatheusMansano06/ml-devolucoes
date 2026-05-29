@@ -429,6 +429,12 @@ td span {
   color: #9f2c1d;
 }
 
+.notice.shopee-info.success {
+  border-color: #b7e4c7;
+  background: #eefbf3;
+  color: #1f6f46;
+}
+
 .empty {
   padding: 48px;
   text-align: center;
@@ -1917,8 +1923,102 @@ body.meli-page {
   border: 1px solid #fecaca;
 }
 
+.full-reviewed-actions {
+  border-color: #c7dcff;
+  background: linear-gradient(90deg, #f8fbff, #ffffff);
+}
+
+.ml-inline-action {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid #bfd7ff;
+  background: #fff;
+  color: #175cd3;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.ml-inline-action:hover {
+  background: #eef5ff;
+}
+
 .arrival-question button:disabled {
   cursor: not-allowed;
+}
+
+.recebimento-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e0e7ef;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.recebimento-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recebimento-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.recebimento-card p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.recebimento-card header a {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1769ff;
+  text-decoration: none;
+}
+
+.recebimento-card header a:hover {
+  text-decoration: underline;
+}
+
+.recebimento-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  align-items: center;
+}
+
+.recebimento-grid span {
+  color: #475569;
+  font-size: 13px;
+}
+
+.recebimento-grid strong {
+  font-size: 14px;
+}
+
+.recebimento-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 12px;
+}
+
+.recebimento-card footer span {
+  font-weight: 700;
+}
+
+.recebimento-card footer strong {
+  font-size: 18px;
+  color: #0f172a;
 }
 
 .checklist-panel,
@@ -2062,10 +2162,16 @@ body.meli-page {
   .return-card,
   .review-steps,
   .detail-product,
+  .recebimento-grid,
   .arrival-question,
   .pretty-check,
   .evidence-upload {
     grid-template-columns: 1fr;
+  }
+
+  .recebimento-card header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .case-reason,
@@ -2622,6 +2728,106 @@ body.meli-page {
 
 .btn-upload:hover {
   background: #f3f8ff;
+}
+
+.checklist-upload-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.btn-upload.secondary {
+  border-style: solid;
+  border-color: #b7c9ea;
+  color: #2c4f8f;
+}
+
+.camera-checklist-box {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+  display: grid;
+  gap: 10px;
+}
+
+.camera-checklist-box.hidden {
+  display: none;
+}
+
+.camera-checklist-box video {
+  width: 100%;
+  max-height: 260px;
+  border-radius: 8px;
+  background: #0f172a;
+  object-fit: cover;
+}
+
+.camera-checklist-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.camera-checklist-actions button {
+  border: 1px solid #1769ff;
+  background: #1769ff;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.camera-checklist-actions button.secondary {
+  background: #fff;
+  color: #244271;
+  border-color: #c7d5ea;
+}
+
+.fotos-checklist-empty {
+  margin: 0;
+  color: #61728d;
+  font-size: 13px;
+}
+
+.fotos-checklist-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.foto-checklist-card {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  background: #fff;
+}
+
+.foto-checklist-card img {
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.foto-checklist-card small {
+  color: #5e6d84;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.danger-light {
+  border: 1px solid #f1c0bc;
+  background: #fff7f6;
+  color: #b7302b;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .etapa-actions {
@@ -4605,6 +4811,7 @@ body.meli-page {
 
 .arrival-question,
 .detail-product,
+.recebimento-card,
 .checklist-panel,
 .evidence-panel,
 .contest-panel,
@@ -5589,4 +5796,78 @@ body.meli-page {
 .btn-ver-detalhes:hover {
   background: #0d9488;
   color: white;
+}
+
+/* Atalhos compactos no cabeçalho de "Próximas a serem atendidas" */
+.summary-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.summary-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.shortcut-chip {
+  border: 1px solid #dbe7fb;
+  background: #f8fbff;
+  color: #334155;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.shortcut-chip b {
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.shortcut-chip:hover {
+  border-color: #bfdbfe;
+  background: #eef5ff;
+}
+
+@media (max-width: 1180px) {
+  .summary-header-actions {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 760px) {
+  .summary-shortcuts {
+    justify-content: flex-end;
+  }
+  .shortcut-chip {
+    font-size: 11px;
+    padding: 5px 8px;
+  }
+}
+
+.mediacoes-group {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.mediacoes-group h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.mediacoes-empty {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
 }

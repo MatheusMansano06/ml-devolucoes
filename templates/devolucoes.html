@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Gerenciar Devolucoes</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='meli-flow-31') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='meli-flow-33') }}">
 </head>
 <body class="app-body meli-page">
 
@@ -89,7 +89,20 @@
                 <p>Organize e priorize suas pendências</p>
               </div>
               <strong id="totalResumoML" class="sr-total">0</strong>
-              <button type="button" class="summary-link" data-floating-panel="painelTodasDevolucoes">Ver todas</button>
+              <div class="summary-header-actions">
+                <div class="summary-shortcuts">
+                  <button type="button" class="shortcut-chip" id="shortcutChamados" data-shortcut="mediacoes">
+                    Chamados <b id="disputasAbertasMini">0</b>
+                  </button>
+                  <button type="button" class="shortcut-chip" id="shortcutReembolsos" data-shortcut="aguardando-plataforma">
+                    Reembolso <b id="reembolsosPendentesMini">0</b>
+                  </button>
+                  <button type="button" class="shortcut-chip" id="shortcutRisco" data-shortcut="outros-problemas">
+                    Reputação <b id="riscosReputacaoMini">0</b>
+                  </button>
+                </div>
+                <button type="button" class="summary-link" data-floating-panel="painelTodasDevolucoes">Ver todas</button>
+              </div>
             </div>
           </div>
           <div class="summary-list">
@@ -258,12 +271,12 @@
         </div>
         <div class="etapa-content">
           <label class="checkbox-item">
-            <input type="checkbox" name="inspecao_confere" value="true">
-            <span>Produto confere com descrição?</span>
+            <input type="checkbox" name="produto_confere" value="true">
+            <span>Produto confere com a descrição do anúncio</span>
           </label>
           <label class="checkbox-item">
             <input type="checkbox" name="motivo_confere" value="true">
-            <span>Motivo informado pelo comprador confere?</span>
+            <span>Motivo informado pelo comprador confere com o item recebido</span>
           </label>
           <label class="checkbox-item problem-item">
             <input type="checkbox" name="embalagem_rasgada" value="true">
@@ -301,22 +314,6 @@
             <input type="checkbox" name="sem_embalagem_original" value="true">
             <span>Sem embalagem original</span>
           </label>
-          <label class="checkbox-item legacy-check">
-            <input type="checkbox" name="inspecao_embalagem" value="true">
-            <span>Embalagem está íntegra?</span>
-          </label>
-          <label class="checkbox-item">
-            <input type="checkbox" name="inspecao_sinais_uso" value="true">
-            <span>Sem sinais de uso?</span>
-          </label>
-          <label class="checkbox-item">
-            <input type="checkbox" name="inspecao_quebrado" value="true">
-            <span>Nenhuma peça quebrada?</span>
-          </label>
-          <label class="checkbox-item">
-            <input type="checkbox" name="inspecao_pecas" value="true">
-            <span>Todas as peças incluídas?</span>
-          </label>
         </div>
         <div class="etapa-actions">
           <button type="button" class="btn-pausar">Pausar</button>
@@ -347,9 +344,19 @@
           <p>Tire fotos se houver divergência</p>
         </div>
         <div class="etapa-content">
-          <p style="margin-bottom: 16px; color: #637083; font-size: 13px;">Selecione ou arraste fotos dos problemas encontrados</p>
-          <input type="file" id="inputFotosChecklist" multiple accept="image/*,video/*" style="display: none;">
-          <button type="button" class="btn-upload" onclick="document.getElementById('inputFotosChecklist').click()">+ Adicionar fotos/vídeos</button>
+          <p style="margin-bottom: 16px; color: #637083; font-size: 13px;">Anexe fotos do computador ou tire foto pela câmera</p>
+          <input type="file" id="inputFotosChecklist" multiple accept="image/*" style="display: none;">
+          <div class="checklist-upload-actions">
+            <button type="button" class="btn-upload" id="btnSelecionarFotosChecklist">+ Adicionar fotos</button>
+            <button type="button" class="btn-upload secondary" id="btnAbrirCameraChecklist">Usar câmera</button>
+          </div>
+          <div id="cameraChecklistBox" class="camera-checklist-box hidden">
+            <video id="cameraChecklistPreview" autoplay playsinline muted></video>
+            <div class="camera-checklist-actions">
+              <button type="button" id="btnCapturarFotoChecklist">Capturar foto</button>
+              <button type="button" class="secondary" id="btnFecharCameraChecklist">Fechar câmera</button>
+            </div>
+          </div>
           <div id="listaFotosChecklist" style="margin-top: 12px;"></div>
         </div>
         <div class="etapa-actions">
@@ -381,17 +388,64 @@
     let syncInProgress = false;
     let ultimoTotalDevolucoes = 0;
     let resumoMlAtual = null;
+    let mediacoesAcompanhamento = [];
 
     const money = (value) => Number(value || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-    const label = (value) => String(value || "-").replaceAll("_", " ");
+    const moneySigned = (value) => {
+      const amount = Number(value || 0);
+      return amount < 0 ? `-${money(Math.abs(amount))}` : money(amount);
+    };
+    const toDateShort = (value) => {
+      if (!value) return "-";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "-";
+      return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "long" });
+    };
+    const round2 = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+    const label = (value) => {
+      const key = String(value || "-").toLowerCase();
+      if (key === "aguardando_plataforma") return "processando";
+      return String(value || "-").replaceAll("_", " ");
+    };
     const isFinal = (item) => ["aprovado", "parcial", "reprovado", "encerrado", "sem_divergencia"].includes(item.status);
     const isFull = (item) => item.ml_tipo_logistica === "full_ml";
     const isOrganica = (item) => !isFull(item);
     const needsReview = (item) => ["produto_recebido", "divergencia_encontrada", "em_analise"].includes(item.status) && Number(item.requer_acao ?? 1) === 1;
-    const needsPickup = (item) => item.prioridade_prazo === "retirar_correio";
+    const hasPendingSellerReview = (item = {}) => {
+      const reviews = parseJsonSafe(item.ml_return_reviews, []);
+      if (!Array.isArray(reviews) || !reviews.length) return false;
+      return reviews.some((review) => {
+        const resourceReviews = (review || {}).resource_reviews || [];
+        return resourceReviews.some((resourceReview) => {
+          const sellerStatus = String((resourceReview || {}).seller_status || "").toLowerCase();
+          const stage = String((resourceReview || {}).stage || "").toLowerCase();
+          return sellerStatus === "pending" || stage === "seller_review_pending";
+        });
+      });
+    };
+    const isFullPendingReviewCase = (item = {}) => {
+      const full = String(item.ml_tipo_logistica || "").toLowerCase() === "full_ml";
+      const destination = String(item.ml_destino_devolucao || "").toLowerCase();
+      const stage = String(item.ml_stage || "").toLowerCase();
+      const claimStatus = String(item.ml_status || "").toLowerCase();
+      const returnStatus = String(item.ml_return_status || "").toLowerCase();
+      return full && destination === "warehouse" && stage === "dispute" && claimStatus === "closed" && returnStatus === "delivered" && hasPendingSellerReview(item);
+    };
+    const isFinishedFlow = (item) => {
+      if (isFullPendingReviewCase(item)) return false;
+      const statusFinal = isFinal(item);
+      const localClosed = Number(item?.ml_ativo ?? 1) === 0 && Number(item?.requer_acao ?? 1) === 0 && item?.chegada_status === "esperado";
+      const mlClosed = String(item?.ml_status || "").toLowerCase() === "closed" && Number(item?.requer_acao ?? 1) === 0;
+      return statusFinal || localClosed || mlClosed;
+    };
+    const needsPickup = (item) => !isFull(item) && item.prioridade_prazo === "retirar_correio";
     const otherProblems = (item) => !needsReview(item) && !needsPickup(item);
-    const inMediation = (item) => ["divergencia_encontrada", "contestacao_aberta"].includes(item.status);
+    const inMediation = (item) => ["divergencia_encontrada", "contestacao_aberta", "aguardando_plataforma"].includes(item.status);
+    const hasReputationRisk = (item) =>
+      item.motivo_devolucao === "PDD9952" ||
+      String(item.acao_recomendada || "").toLowerCase().includes("reputa");
     const isMlReviewLocked = (item) => {
+      if (isFullPendingReviewCase(item)) return false;
       const requerAcao = Number(item?.requer_acao ?? 1);
       if (requerAcao === 1) return false;
       const returnStatus = String(item?.ml_return_status || "").toLowerCase();
@@ -409,6 +463,18 @@
     const setText = (id, value) => {
       const element = document.getElementById(id);
       if (element) element.textContent = value;
+    };
+    const atualizarPainelDisputas = () => {
+      const processando = mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "processando").length;
+      const concluidas = mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "concluida").length;
+      const chamadosAbertos = processando;
+      const aguardandoReembolso = processando;
+      const riscosReputacao = devolucoes.filter((item) =>
+        hasReputationRisk(item) && !isFinal(item)
+      ).length;
+      setText("disputasAbertasMini", chamadosAbertos);
+      setText("reembolsosPendentesMini", concluidas);
+      setText("riscosReputacaoMini", riscosReputacao);
     };
     const logisticLabel = (item) => isFull(item) ? "FULL" : "ORGANICA";
     const financeLine = (item) => {
@@ -428,13 +494,19 @@
       PDD9946: "A embalagem chegou danificada",
       PDD9952: "Afetou a reputacao",
     }[value] || value || "-");
+    const motivoExibicao = (item = {}) => (
+      isFullReviewedReturn(item)
+        ? "Devolucao revisada pelo Mercado Livre (Full)"
+        : motivoLabel(item.motivo_devolucao)
+    );
     const cleanMlId = (value) => String(value || "").trim();
     const mlIdParts = (item = {}) => {
       const packId = cleanMlId(item.pack_id);
       const orderId = cleanMlId(item.pedido_id || item.order_id || item.resource_id);
       const claimId = cleanMlId(item.claim_id || item.ml_claim_id);
       const returnId = cleanMlId(item.return_id || item.ml_return_id);
-      const principal = packId || orderId || claimId || returnId || "-";
+      // Prioriza o ID exibido no ML (pedido/order) para evitar confusao com pack_id.
+      const principal = orderId || packId || claimId || returnId || "-";
       const secundarios = [];
       if (packId && packId !== principal) secundarios.push(`Pack ${packId}`);
       if (orderId && orderId !== principal) secundarios.push(`Pedido ${orderId}`);
@@ -446,6 +518,51 @@
     const mlSecondaryIdLine = (item = {}) => {
       const ids = mlIdParts(item).secundarios;
       return ids.length ? `<small>${ids.join(" · ")}</small>` : "";
+    };
+    const parseJsonSafe = (value, fallback = []) => {
+      try { return JSON.parse(value || "[]"); } catch { return fallback; }
+    };
+    const isFullReviewedReturn = (item = {}) => isFullPendingReviewCase(item);
+    const recebimentoDetalhado = (item = {}) => {
+      const precoProduto = round2(Number(item.ml_valor_pago || item.valor_produto || 0));
+      const tarifaVenda = round2(-Math.abs(Number(item.ml_taxa_venda || 0)));
+      const tarifaDevolucao = round2(-Math.abs(Number(item.ml_tarifa_devolucao || 0)));
+      const estorno = round2(Math.abs(Number(item.ml_valor_reembolsado || 0)));
+      const subtotalSemCancel = round2(precoProduto + tarifaVenda + tarifaDevolucao + estorno);
+      const statusMoney = String(item.ml_status_money || "").toLowerCase();
+      const statusPagamento = String(item.ml_status_pagamento || "").toLowerCase();
+      const temDevolucaoFinanceira = estorno > 0 || statusMoney === "refunded" || statusPagamento === "refunded";
+      const cancelamentos = temDevolucaoFinanceira ? round2(-subtotalSemCancel) : 0;
+      const total = round2(subtotalSemCancel + cancelamentos);
+      return { precoProduto, tarifaVenda, tarifaDevolucao, estorno, cancelamentos, total };
+    };
+    const recebimentoDetalhesHTML = (item = {}) => {
+      const r = recebimentoDetalhado(item);
+      const ref = cleanMlId(item.ml_claim_id) || cleanMlId(item.ml_return_id) || cleanMlId(item.pedido_id);
+      const dataRef = toDateShort(item.ultima_sincronizacao_ml || item.data_solicitacao);
+      const mlUrl = mlDetailUrl(item);
+      return `
+        <section class="recebimento-card">
+          <header>
+            <div>
+              <h3>Recebimento devolvido</h3>
+              <p>#${ref || "-"} · ${dataRef}</p>
+            </div>
+            <a href="${mlUrl}" target="_blank" rel="noopener">Ver detalhe ML</a>
+          </header>
+          <div class="recebimento-grid">
+            <span>Preco do produto</span><strong>${moneySigned(r.precoProduto)}</strong>
+            <span>Tarifa de venda total</span><strong>${moneySigned(r.tarifaVenda)}</strong>
+            <span>Tarifa de devolucao</span><strong>${moneySigned(r.tarifaDevolucao)}</strong>
+            <span>Estorno</span><strong>${moneySigned(r.estorno)}</strong>
+            <span>Cancelamentos</span><strong>${moneySigned(r.cancelamentos)}</strong>
+          </div>
+          <footer>
+            <span>Total</span>
+            <strong>${moneySigned(r.total)}</strong>
+          </footer>
+        </section>
+      `;
     };
     const showImportFeedback = (message, type = "info", detail = "") => {
       const target = document.getElementById("importFeedback");
@@ -537,11 +654,13 @@
         if (status) params.set("status", status);
         if (prioridade) params.set("prioridade", prioridade);
 
-        const [lista] = await Promise.all([
+        const [lista, mediacoes] = await Promise.all([
           api(`/api/devolucoes?${params.toString()}`),
           carregarResumoML(),
+          api("/api/devolucoes/mediacoes").catch(() => []),
         ]);
         devolucoes = lista;
+        mediacoesAcompanhamento = Array.isArray(mediacoes) ? mediacoes : [];
         aplicarFiltros();
         renderUrgencias({ usarResumoLocal: !resumoMlAtual });
         await carregarHistoricoIncompletos();
@@ -566,7 +685,14 @@
         button.textContent = "Sincronizando...";
       }
       try {
-        const result = await api("/api/devolucoes/sincronizar-ml", { method: "POST", body: "{}", timeoutMs: 300000 });
+        let result;
+        try {
+          // Fluxo principal (rapido): classificacao/cache
+          result = await api("/api/devolucoes/sincronizar-ml", { method: "POST", body: "{}", timeoutMs: 300000 });
+        } catch (quickSyncError) {
+          // Fallback: completo apenas se o rapido falhar
+          result = await api("/api/devolucoes/sincronizar-ml-completo", { method: "POST", body: "{}", timeoutMs: 300000 });
+        }
         await carregarTudo();
 
         const totalAtual = result.resumo?.total || result.total || 0;
@@ -619,6 +745,27 @@
       renderListaFiltradaCentro();
     }
 
+    async function abrirAtalhoResumo(tipo) {
+      if (tipo === "mediacoes") {
+        abrirPainelFlutuante("mediacoes");
+        return;
+      }
+      if (tipo === "aguardando-plataforma") {
+        const itens = devolucoes.filter((item) =>
+          item.status === "aguardando_plataforma" ||
+          String(item.ml_status_pagamento || "").toLowerCase() === "in_mediation"
+        );
+        abrirPainelFlutuante("painelTodasDevolucoes", itens, "Aguardando reembolso");
+        return;
+      }
+      if (tipo === "outros-problemas") {
+        urgencyFilter = "full";
+        renderUrgencias();
+        aplicarFiltros();
+        await abrirPainelCardsBucket("outros_problemas", "Outros problemas");
+      }
+    }
+
     function renderUrgencias({ usarResumoLocal = false } = {}) {
       if (resumoMlAtual && !usarResumoLocal) {
         setText("paraRevisao", resumoMlAtual.para_revisao || 0);
@@ -633,10 +780,12 @@
       setText("urgRevisao", revisao);
       setText("orgTotal", retirar);
       setText("fullTotal", outros);
-      setText("mediacaoTotal", devolucoes.filter(inMediation).length);
-      const totalTarifas = devolucoes.reduce((sum, item) => sum + (Number(item.ml_taxa_venda || 0)), 0);
+      setText("mediacaoTotal", mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "processando").length);
+      const mediaConcluidas = mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "concluida");
+      const totalTarifas = mediaConcluidas.reduce((sum, item) => sum + (Number(item.ml_tarifa_devolucao || 0)), 0);
       const tarifasFormatado = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalTarifas);
       setText("totalTarifas", tarifasFormatado);
+      atualizarPainelDisputas();
       if (usarResumoLocal || !resumoMlAtual) {
         setText("paraRevisao", revisao);
         setText("paraRetirar", retirar);
@@ -694,6 +843,8 @@
     function renderPedidoConfirmacao(item) {
       const primaryId = mlPrimaryId(item);
       const secondaryIds = mlSecondaryIdLine(item);
+      const fullReviewed = isFullReviewedReturn(item);
+      const mlUrl = mlDetailUrl(item);
       document.getElementById("pedidoConfirmacaoConteudo").innerHTML = `
         <div class="confirm-order">
           <div class="confirm-order-header">
@@ -710,8 +861,8 @@
               ${secondaryIds}
               <h3>${item.produto_nome}</h3>
               <div class="reason-highlight">
-                <b>Motivo alegado pelo comprador</b>
-                <strong>${motivoLabel(item.motivo_devolucao)}</strong>
+                <b>${fullReviewed ? "Situacao do caso" : "Motivo alegado pelo comprador"}</b>
+                <strong>${motivoExibicao(item)}</strong>
               </div>
               <dl>
                 <dt>Cliente</dt><dd>${item.cliente_nome}</dd>
@@ -722,15 +873,37 @@
             </div>
           </div>
           <div class="confirm-order-actions">
-            <button type="button" id="confirmarPedidoCorreto">Esse e o pedido</button>
+            ${fullReviewed ? `
+              <a href="${mlUrl}" target="_blank" rel="noopener" class="secondary-button">Ver fotos e evidencias</a>
+              <a href="${mlUrl}" target="_blank" rel="noopener" class="secondary-button">Solicitar retirada</a>
+              <button type="button" id="fullRetireiComProblemaConfirmacao">Retirei o produto e estou com problema</button>
+            ` : `<button type="button" id="confirmarPedidoCorreto">Esse e o pedido</button>`}
             <button type="button" class="secondary-button" data-close-confirmacao>Cancelar</button>
           </div>
         </div>
       `;
-      document.getElementById("confirmarPedidoCorreto").addEventListener("click", () => {
-        document.getElementById("modalPedidoConfirmacao").close();
-        abrirChegadaModal(item);
-      });
+      const confirmarPedidoCorreto = document.getElementById("confirmarPedidoCorreto");
+      if (confirmarPedidoCorreto) {
+        confirmarPedidoCorreto.addEventListener("click", () => {
+          document.getElementById("modalPedidoConfirmacao").close();
+          abrirChegadaModal(item);
+        });
+      }
+      const fullProblemaBtn = document.getElementById("fullRetireiComProblemaConfirmacao");
+      if (fullProblemaBtn) {
+        fullProblemaBtn.addEventListener("click", async () => {
+          try {
+            await api(`/api/devolucoes/${item.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "divergente" }) });
+            document.getElementById("modalPedidoConfirmacao").close();
+            showImportFeedback("Fluxo de mediacao aberto.", "success", "Caso Full marcado com problema apos retirada.");
+            itemEmConferencia = item;
+            selecionada = item;
+            abrirChecklistEtapas(item.id);
+          } catch (error) {
+            showImportFeedback("Nao foi possivel abrir o fluxo de mediacao.", "error", error.message);
+          }
+        });
+      }
       document.querySelectorAll("[data-close-confirmacao]").forEach((button) => {
         button.addEventListener("click", () => document.getElementById("modalPedidoConfirmacao").close(), { once: true });
       });
@@ -745,8 +918,8 @@
     function abrirChegadaModal(item) {
       itemEmConferencia = item;
       document.getElementById("modalMotivoChegada").innerHTML = `
-        <b>Motivo alegado pelo comprador</b>
-        <strong>${motivoLabel(item.motivo_devolucao)}</strong>
+        <b>${isFullReviewedReturn(item) ? "Situacao do caso" : "Motivo alegado pelo comprador"}</b>
+        <strong>${motivoExibicao(item)}</strong>
       `;
       document.getElementById("modalChegada").showModal();
     }
@@ -902,6 +1075,42 @@
       ]);
       selecionada = item;
       renderLista();
+      if (isFinishedFlow(item)) {
+        const finalizadoHTML = `
+          <div class="meli-detail-body">
+            <section class="notice shopee-info success">
+              <strong>Pedido finalizado</strong>
+              <p>Esta devolucao ja foi concluida e nao requer novo fluxo de chegada/mediacao.</p>
+              <a class="locked-ml-link" href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver detalhe ML</a>
+            </section>
+            <section class="detail-product">
+              <img src="${productImage(item)}" alt="">
+              <dl>
+                <dt>ID</dt><dd>${mlPrimaryId(item)}</dd>
+                <dt>Status local</dt><dd>${label(item.status)}</dd>
+                <dt>Status ML</dt><dd>${item.ml_return_status || item.ml_status || "-"}</dd>
+                <dt>Cliente</dt><dd>${item.cliente_nome}</dd>
+                <dt>Motivo</dt><dd>${item.motivo_devolucao}</dd>
+              </dl>
+            </section>
+            ${recebimentoDetalhesHTML(item)}
+            <section class="history-list">
+              <h3>Historico</h3>
+              ${historico.map((hist) => `<p>${label(hist.status_anterior)} -> ${label(hist.status_novo)}<br><small>${hist.data_alteracao}</small></p>`).join("") || "<p>Nenhuma alteracao.</p>"}
+            </section>
+          </div>
+        `;
+        if (target === "modal") {
+          const modal = document.getElementById("modalPainelFlutuante");
+          setText("floatingPanelEyebrow", "Atendimento");
+          setText("floatingPanelTitle", item.produto_nome || "Devolucao");
+          document.getElementById("floatingPanelContent").innerHTML = finalizadoHTML;
+          if (!modal.open) modal.showModal();
+        } else {
+          document.getElementById("detalhe").innerHTML = finalizadoHTML;
+        }
+        return;
+      }
       if (isMlReviewLocked(item)) {
         const detalheMlUrl = mlDetailUrl(item);
         const detalheBloqueadoHTML = `
@@ -922,6 +1131,7 @@
               <p>Ainda não é possível abrir chamado/mediação para este pedido. Aguarde a conclusão da revisão da plataforma.</p>
               <a class="locked-ml-link" href="${detalheMlUrl}" target="_blank" rel="noopener">Ver detalhe ML</a>
             </section>
+            ${recebimentoDetalhesHTML(item)}
           </div>
         `;
         if (target === "modal") {
@@ -948,6 +1158,7 @@
             ${mlSecondaryIdLine(item)}
           </div>
         `;
+      const fullReviewed = isFullReviewedReturn(item);
       const detalheHTML = `
         ${detalheHeader}
         <div class="meli-detail-body">
@@ -966,16 +1177,30 @@
             </article>
           </section>
 
-          <section class="arrival-question">
-            <div>
-              <h3>Conferencia da chegada</h3>
-              <p>${isFull(item) ? "Venda Full: acompanhe a revisao do Mercado Livre antes de agir." : "Venda organica: o produto voltou direto para a loja."}</p>
-            </div>
-            <div>
-              <button type="button" id="chegouEsperado">Chegou como esperado</button>
-              <button type="button" id="naoChegouEsperado" class="danger-action">Nao chegou como esperado</button>
-            </div>
-          </section>
+          ${fullReviewed ? `
+            <section class="arrival-question full-reviewed-actions">
+              <div>
+                <h3>Devolucao revisada pelo Mercado Livre (Full)</h3>
+                <p>Para este tipo de caso, confira fotos/evidencias no ML, solicite retirada e, se retirar com problema, abra mediacao.</p>
+              </div>
+              <div>
+                <a class="ml-inline-action" href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver fotos e evidencias</a>
+                <a class="ml-inline-action" href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Solicitar retirada</a>
+                <button type="button" id="fullRetireiComProblema" class="danger-action">Retirei o produto e estou com problema</button>
+              </div>
+            </section>
+          ` : `
+            <section class="arrival-question">
+              <div>
+                <h3>Conferencia da chegada</h3>
+                <p>${isFull(item) ? "Venda Full: acompanhe a revisao do Mercado Livre antes de agir." : "Venda organica: o produto voltou direto para a loja."}</p>
+              </div>
+              <div>
+                <button type="button" id="chegouEsperado">Chegou como esperado</button>
+                <button type="button" id="naoChegouEsperado" class="danger-action">Nao chegou como esperado</button>
+              </div>
+            </section>
+          `}
 
           <section class="detail-product">
             <img src="${productImage(item)}" alt="">
@@ -987,6 +1212,7 @@
               <dt>Acao recomendada</dt><dd>${item.acao_recomendada || cardCopy(item)}</dd>
             </dl>
           </section>
+          ${recebimentoDetalhesHTML(item)}
 
           <section class="checklist-panel ${item.chegada_status === "divergente" ? "" : "muted-process"}">
             <div>
@@ -1017,14 +1243,14 @@
           <section class="evidence-panel ${item.chegada_status === "divergente" ? "" : "muted-process"}">
             <div>
               <h3>Fotos e evidencias</h3>
-              <p>Anexe fotos do produto, embalagem, etiqueta, avaria ou video curto da revisao.</p>
+              <p>Anexe fotos do produto, embalagem, etiqueta ou avaria.</p>
             </div>
             <form id="formEvidencia" class="evidence-upload">
               <input name="descricao" placeholder="Descricao da evidencia">
               <label class="upload-drop">
-                <input name="arquivo" type="file" accept="image/*,video/*" capture="environment" required>
+                <input name="arquivo" type="file" accept="image/*" capture="environment" required>
                 <b>Tirar foto ou anexar arquivo</b>
-                <span>Imagem ou video da devolucao</span>
+                <span>Somente imagens da devolucao</span>
               </label>
               <button type="submit">Enviar evidencia</button>
             </form>
@@ -1079,28 +1305,42 @@
     function bindDetalhe() {
       const chegouEsperadoBtn = document.getElementById("chegouEsperado");
       const naoChegouEsperadoBtn = document.getElementById("naoChegouEsperado");
+      const fullRetireiComProblemaBtn = document.getElementById("fullRetireiComProblema");
       const checklistFormElement = document.getElementById("formChecklist");
       const evidenciaFormElement = document.getElementById("formEvidencia");
       const contestacaoFormElement = document.getElementById("formContestacao");
       const gerarMediacaoBtn = document.getElementById("gerarMediacao");
-      if (!chegouEsperadoBtn || !naoChegouEsperadoBtn || !checklistFormElement || !evidenciaFormElement || !contestacaoFormElement || !gerarMediacaoBtn) {
+      if (!checklistFormElement || !evidenciaFormElement || !contestacaoFormElement || !gerarMediacaoBtn) {
         return;
       }
 
-      chegouEsperadoBtn.addEventListener("click", async () => {
-        try {
-          await api(`/api/devolucoes/${selecionada.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "esperado" }) });
-          showImportFeedback("Devolucao concluida no Mercado Livre.", "success", "Produto marcado como recebido conforme esperado.");
-          await carregarTudo();
-        } catch (error) {
-          showImportFeedback("Nao foi possivel concluir no Mercado Livre.", "error", error.message);
-        }
-      });
+      if (chegouEsperadoBtn) {
+        chegouEsperadoBtn.addEventListener("click", async () => {
+          try {
+            await api(`/api/devolucoes/${selecionada.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "esperado" }) });
+            showImportFeedback("Devolucao concluida no Mercado Livre.", "success", "Produto marcado como recebido conforme esperado.");
+            await carregarTudo();
+          } catch (error) {
+            showImportFeedback("Nao foi possivel concluir no Mercado Livre.", "error", error.message);
+          }
+        });
+      }
 
-      naoChegouEsperadoBtn.addEventListener("click", async () => {
-        await api(`/api/devolucoes/${selecionada.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "divergente" }) });
-        await abrirDetalhe(selecionada.id);
-      });
+      if (naoChegouEsperadoBtn) {
+        naoChegouEsperadoBtn.addEventListener("click", async () => {
+          await api(`/api/devolucoes/${selecionada.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "divergente" }) });
+          await abrirDetalhe(selecionada.id);
+        });
+      }
+
+      if (fullRetireiComProblemaBtn) {
+        fullRetireiComProblemaBtn.addEventListener("click", async () => {
+          await api(`/api/devolucoes/${selecionada.id}/chegada`, { method: "POST", body: JSON.stringify({ resultado: "divergente" }) });
+          showImportFeedback("Fluxo de mediacao aberto.", "success", "Caso Full marcado com problema apos retirada.");
+          itemEmConferencia = selecionada;
+          abrirChecklistEtapas(selecionada.id);
+        });
+      }
 
       const checklistForm = checklistFormElement;
       const contestForm = contestacaoFormElement;
@@ -1272,27 +1512,72 @@
         setText("floatingPanelEyebrow", "Atendimento");
         const isMediacoes = tipo === "mediacoes";
         setText("floatingPanelTitle", titulo || (isMediacoes ? "Acompanhamento de mediações" : "Todas as devolucoes"));
-        const painelItens = itens || (isMediacoes ? devolucoes.filter((item) => item.status === "contestacao_aberta" || item.mediacao_mensagem) : devolucoes);
-        content.innerHTML = painelItens.length ? `
-          <div class="floating-grid">
-            ${painelItens.map((item) => `
-              <article class="floating-card">
-                <img src="${productImage(item)}" alt="">
-                <b>${mlPrimaryId(item)}</b>
-                <strong>${item.produto_nome}</strong>
-                <span class="floating-card-actions">
-                  <button type="button" data-open-pedido="${mlIdParts(item).principal}">Abrir fluxo</button>
-                  <a href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver detalhe ML</a>
-                </span>
-              </article>
-            `).join("")}
-          </div>
-        ` : `<div class="empty compact"><h2>Nenhuma devolucao encontrada</h2><p>Sincronize o Mercado Livre para atualizar.</p></div>`;
+        const painelItens = itens || (isMediacoes ? mediacoesAcompanhamento : devolucoes);
+        if (isMediacoes) {
+          const processando = painelItens.filter((item) => item.situacao_mediacao === "processando");
+          const concluidas = painelItens.filter((item) => item.situacao_mediacao === "concluida");
+          content.innerHTML = `
+            <div class="mediacoes-group">
+              <h3>Processando no Mercado Livre (${processando.length})</h3>
+              ${processando.length ? `<div class="floating-grid">${processando.map((item) => `
+                <article class="floating-card">
+                  <img src="${productImage(item)}" alt="">
+                  <b>${mlPrimaryId(item)}</b>
+                  <strong>${item.produto_nome}</strong>
+                  <small>Status: processando</small>
+                  <span class="floating-card-actions">
+                    <button type="button" data-open-id="${item.id}">Ver acompanhamento</button>
+                    <a href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver detalhe ML</a>
+                  </span>
+                </article>
+              `).join("")}</div>` : `<p class="mediacoes-empty">Nenhuma mediação em processamento.</p>`}
+            </div>
+            <div class="mediacoes-group">
+              <h3>Concluídas (${concluidas.length})</h3>
+              ${concluidas.length ? `<div class="floating-grid">${concluidas.map((item) => `
+                <article class="floating-card">
+                  <img src="${productImage(item)}" alt="">
+                  <b>${mlPrimaryId(item)}</b>
+                  <strong>${item.produto_nome}</strong>
+                  <small>Resultado: ${label(item.status)} · Tarifa: ${money(item.ml_tarifa_devolucao || 0)}</small>
+                  <span class="floating-card-actions">
+                    <button type="button" data-open-id="${item.id}">Ver resultado</button>
+                    <a href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver detalhe ML</a>
+                  </span>
+                </article>
+              `).join("")}</div>` : `<p class="mediacoes-empty">Nenhuma mediação concluída.</p>`}
+            </div>
+          `;
+        } else {
+          content.innerHTML = painelItens.length ? `
+            <div class="floating-grid">
+              ${painelItens.map((item) => `
+                <article class="floating-card">
+                  <img src="${productImage(item)}" alt="">
+                  <b>${mlPrimaryId(item)}</b>
+                  <strong>${item.produto_nome}</strong>
+                  <span class="floating-card-actions">
+                    <button type="button" data-open-pedido="${mlIdParts(item).principal}">Abrir fluxo</button>
+                    <a href="${mlDetailUrl(item)}" target="_blank" rel="noopener">Ver detalhe ML</a>
+                  </span>
+                </article>
+              `).join("")}
+            </div>
+          ` : `<div class="empty compact"><h2>Nenhuma devolucao encontrada</h2><p>Sincronize o Mercado Livre para atualizar.</p></div>`;
+        }
         content.querySelectorAll("[data-open-pedido]").forEach((button) => {
           button.addEventListener("click", async () => {
             const pedidoId = button.dataset.openPedido;
             if (!pedidoId) return;
             await abrirFluxoPadraoPorPedido(pedidoId, { sourceButton: button, fromSearch: false });
+          });
+        });
+        content.querySelectorAll("[data-open-id]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const itemId = Number(button.dataset.openId || 0);
+            if (!itemId) return;
+            modal.close();
+            await abrirDetalhe(itemId);
           });
         });
       }
@@ -1388,6 +1673,12 @@
         if (result.devolucao?.id) {
           const floatingModal = document.getElementById("modalPainelFlutuante");
           if (floatingModal?.open) floatingModal.close();
+          if (isFinishedFlow(result.devolucao)) {
+            clearImportFeedback();
+            showImportFeedback("Pedido ja finalizado.", "success", "Esse ID nao precisa abrir novo fluxo.");
+            await abrirDetalhe(result.devolucao.id, "modal");
+            return;
+          }
           if (isMlReviewLocked(result.devolucao)) {
             clearImportFeedback();
             await abrirDetalhe(result.devolucao.id, "modal");
@@ -1492,9 +1783,73 @@
 
     // Gerenciar navegação entre etapas do checklist
     let etapaAtual = 1;
+    let checklistCameraStream = null;
+
+    function stopChecklistCamera() {
+      if (checklistCameraStream) {
+        checklistCameraStream.getTracks().forEach((track) => track.stop());
+        checklistCameraStream = null;
+      }
+      const cameraBox = document.getElementById("cameraChecklistBox");
+      const preview = document.getElementById("cameraChecklistPreview");
+      if (cameraBox) cameraBox.classList.add("hidden");
+      if (preview) preview.srcObject = null;
+    }
+
+    async function carregarEvidenciasChecklistModal(itemId) {
+      const lista = await api(`/api/devolucoes/${itemId}/evidencias`);
+      const target = document.getElementById("listaFotosChecklist");
+      if (!target) return;
+      if (!Array.isArray(lista) || !lista.length) {
+        target.innerHTML = `<p class="fotos-checklist-empty">Nenhuma foto anexada ainda.</p>`;
+        return;
+      }
+      target.innerHTML = `
+        <div class="fotos-checklist-grid">
+          ${lista.map((ev) => `
+            <article class="foto-checklist-card">
+              <a href="${ev.arquivo}" target="_blank" rel="noopener">
+                <img src="${ev.arquivo}" alt="${ev.descricao || "Evidencia"}">
+              </a>
+              <small>${ev.descricao || "Foto anexada"}</small>
+              <button type="button" data-remover-evidencia="${ev.id}" class="danger-light">Remover</button>
+            </article>
+          `).join("")}
+        </div>
+      `;
+      target.querySelectorAll("[data-remover-evidencia]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const evidenciaId = Number(button.dataset.removerEvidencia || 0);
+          if (!evidenciaId || !selecionada?.id) return;
+          await api(`/api/devolucoes/${selecionada.id}/evidencias/${evidenciaId}`, { method: "DELETE" });
+          await carregarEvidenciasChecklistModal(selecionada.id);
+        });
+      });
+    }
+
+    async function uploadFotosChecklist(files) {
+      if (!selecionada?.id || !files?.length) return;
+      for (const file of files) {
+        if (!file || !String(file.type || "").startsWith("image/")) continue;
+        const form = new FormData();
+        form.append("descricao", file.name || "Foto checklist");
+        form.append("tipo", "imagem");
+        form.append("arquivo", file);
+        const response = await fetch(`/api/devolucoes/${selecionada.id}/evidencias/upload`, { method: "POST", body: form });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.mensagem || "Falha ao anexar foto.");
+        }
+      }
+      await carregarEvidenciasChecklistModal(selecionada.id);
+      showImportFeedback("Foto(s) anexada(s).", "success", "Evidencias atualizadas com sucesso.");
+    }
+
     function abrirChecklistEtapas(itemId) {
       etapaAtual = 1;
-      selecionada = itemEmConferencia;
+      const itemReal = devolucoes.find((item) => Number(item.id) === Number(itemId)) || itemEmConferencia || selecionada || { id: itemId };
+      selecionada = itemReal;
+      itemEmConferencia = itemReal;
       const etapaHeader = document.querySelector(".checklist-etapas-dialog .etapa[data-etapa='1'] .etapa-header");
       if (etapaHeader && !document.getElementById("checklistMotivo")) {
         etapaHeader.insertAdjacentHTML("beforeend", `<div id="checklistMotivo" class="reason-highlight"></div>`);
@@ -1502,11 +1857,22 @@
       if (document.getElementById("checklistMotivo")) {
         document.getElementById("checklistMotivo").innerHTML = `
           <b>Motivo alegado pelo comprador</b>
-          <strong>${motivoLabel(itemEmConferencia?.motivo_devolucao)}</strong>
+          <strong>${motivoLabel(itemReal?.motivo_devolucao || "")}</strong>
         `;
       }
+      document.querySelectorAll("#modalChecklistEtapas .etapa[data-etapa='1'] input[type='checkbox']").forEach((input) => {
+        input.checked = false;
+      });
+      const observacoesField = document.querySelector("textarea[name='observacoes_checklist']");
+      if (observacoesField) observacoesField.value = "";
+      const fileInput = document.getElementById("inputFotosChecklist");
+      if (fileInput) fileInput.value = "";
+      stopChecklistCamera();
       mostrarEtapa(1);
       document.getElementById("modalChecklistEtapas").showModal();
+      if (itemReal?.id) {
+        carregarEvidenciasChecklistModal(itemReal.id).catch(() => {});
+      }
     }
 
     function mostrarEtapa(numero) {
@@ -1540,11 +1906,11 @@
       if (!selecionada?.id) return;
 
       const payload = {
-        produto_confere: document.querySelector("input[name='inspecao_confere']")?.checked || false,
-        embalagem_integra: document.querySelector("input[name='inspecao_embalagem']")?.checked || false,
-        possui_sinais_de_uso: !(document.querySelector("input[name='inspecao_sinais_uso']")?.checked || false),
-        item_quebrado: !(document.querySelector("input[name='inspecao_quebrado']")?.checked || false),
-        faltando_pecas: !(document.querySelector("input[name='inspecao_pecas']")?.checked || false),
+        produto_confere: document.querySelector("input[name='produto_confere']")?.checked || false,
+        embalagem_integra: !(document.querySelector("input[name='embalagem_rasgada']")?.checked || false),
+        possui_sinais_de_uso: document.querySelector("input[name='produto_sujo']")?.checked || false,
+        item_quebrado: document.querySelector("input[name='produto_quebrado']")?.checked || false,
+        faltando_pecas: document.querySelector("input[name='faltando_pecas']")?.checked || false,
         motivo_confere: document.querySelector("input[name='motivo_confere']")?.checked || false,
         embalagem_rasgada: document.querySelector("input[name='embalagem_rasgada']")?.checked || false,
         produto_amassado: document.querySelector("input[name='produto_amassado']")?.checked || false,
@@ -1571,9 +1937,67 @@
       }
     });
 
+    document.getElementById("btnSelecionarFotosChecklist")?.addEventListener("click", () => {
+      document.getElementById("inputFotosChecklist")?.click();
+    });
+
+    document.getElementById("inputFotosChecklist")?.addEventListener("change", async (event) => {
+      const files = Array.from(event.target.files || []);
+      if (!files.length) return;
+      try {
+        await uploadFotosChecklist(files);
+      } catch (error) {
+        showImportFeedback("Nao consegui anexar as fotos.", "error", error.message);
+      } finally {
+        event.target.value = "";
+      }
+    });
+
+    document.getElementById("btnAbrirCameraChecklist")?.addEventListener("click", async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        checklistCameraStream = stream;
+        const preview = document.getElementById("cameraChecklistPreview");
+        const cameraBox = document.getElementById("cameraChecklistBox");
+        if (preview) preview.srcObject = stream;
+        if (cameraBox) cameraBox.classList.remove("hidden");
+      } catch (error) {
+        showImportFeedback("Camera indisponivel.", "error", "Nao foi possivel abrir a camera neste dispositivo.");
+      }
+    });
+
+    document.getElementById("btnCapturarFotoChecklist")?.addEventListener("click", async () => {
+      const preview = document.getElementById("cameraChecklistPreview");
+      if (!preview || !selecionada?.id) return;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = preview.videoWidth || 1280;
+        canvas.height = preview.videoHeight || 720;
+        const context = canvas.getContext("2d");
+        context.drawImage(preview, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+        if (!blob) throw new Error("Nao consegui capturar a foto.");
+        const file = new File([blob], `camera-${Date.now()}.jpg`, { type: "image/jpeg" });
+        await uploadFotosChecklist([file]);
+      } catch (error) {
+        showImportFeedback("Falha ao capturar foto.", "error", error.message);
+      }
+    });
+
+    document.getElementById("btnFecharCameraChecklist")?.addEventListener("click", () => {
+      stopChecklistCamera();
+    });
+
     // Fechar modal de etapas
     document.querySelector("[data-close-checklist]").addEventListener("click", () => {
+      stopChecklistCamera();
       document.getElementById("modalChecklistEtapas").close();
+    });
+    document.getElementById("modalChecklistEtapas")?.addEventListener("close", () => {
+      stopChecklistCamera();
     });
 
     // Botões "Pausar" para salvar progresso
@@ -1581,12 +2005,12 @@
       btn.addEventListener("click", async () => {
         if (!selecionada?.id) return;
 
+        const checks = {};
+        document.querySelectorAll("#modalChecklistEtapas .etapa[data-etapa='1'] input[type='checkbox']").forEach((input) => {
+          checks[input.name] = input.checked;
+        });
         const conteudo = {
-          inspecao_confere: document.querySelector("input[name='inspecao_confere']")?.checked || false,
-          inspecao_embalagem: document.querySelector("input[name='inspecao_embalagem']")?.checked || false,
-          inspecao_sinais_uso: document.querySelector("input[name='inspecao_sinais_uso']")?.checked || false,
-          inspecao_quebrado: document.querySelector("input[name='inspecao_quebrado']")?.checked || false,
-          inspecao_pecas: document.querySelector("input[name='inspecao_pecas']")?.checked || false,
+          checks,
           observacoes: document.querySelector("textarea[name='observacoes_checklist']")?.value || ""
         };
 
@@ -1651,17 +2075,18 @@
         if (checklist.conteudo_progresso_checklist) {
           try {
             const conteudo = JSON.parse(checklist.conteudo_progresso_checklist);
-            document.querySelector("input[name='inspecao_confere']").checked = conteudo.inspecao_confere || false;
-            document.querySelector("input[name='inspecao_embalagem']").checked = conteudo.inspecao_embalagem || false;
-            document.querySelector("input[name='inspecao_sinais_uso']").checked = conteudo.inspecao_sinais_uso || false;
-            document.querySelector("input[name='inspecao_quebrado']").checked = conteudo.inspecao_quebrado || false;
-            document.querySelector("input[name='inspecao_pecas']").checked = conteudo.inspecao_pecas || false;
+            const checks = conteudo.checks || {};
+            Object.entries(checks).forEach(([name, value]) => {
+              const input = document.querySelector(`#modalChecklistEtapas .etapa[data-etapa='1'] input[name='${name}']`);
+              if (input) input.checked = Boolean(value);
+            });
             document.querySelector("textarea[name='observacoes_checklist']").value = conteudo.observacoes || "";
           } catch (e) {
             console.log("Não conseguiu restaurar dados");
           }
         }
 
+        await carregarEvidenciasChecklistModal(itemId);
         document.getElementById("modalChecklistEtapas").showModal();
       } catch (error) {
         alert("Erro ao retomar checklist: " + error.message);
@@ -1694,6 +2119,11 @@
         }
       });
     });
+    document.querySelectorAll(".shortcut-chip[data-shortcut]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await abrirAtalhoResumo(button.dataset.shortcut || "");
+      });
+    });
     document.getElementById("metricaTarifas")?.addEventListener("click", () => {
       const hoje = new Date();
       const mesAtual = String(hoje.getMonth() + 1).padStart(2, '0');
@@ -1711,9 +2141,9 @@
             <div class="filtro-grupo">
               <label for="filtroStatus">Status:</label>
               <select id="filtroStatus">
-                <option value="todos">Todos</option>
-                <option value="com-desconto">Com desconto</option>
-                <option value="sem-desconto">Sem desconto</option>
+                <option value="concluidas">Mediações concluídas</option>
+                <option value="com-desconto">Concluídas com tarifa</option>
+                <option value="sem-desconto">Concluídas sem tarifa</option>
               </select>
             </div>
           </div>
@@ -1746,7 +2176,8 @@
         const statusFiltro = document.getElementById("filtroStatus").value;
         const [anoFiltro, mesFiltroNum] = mesFiltro.split('-');
 
-        let itensRenderizar = devolucoes.filter((item) => {
+        let itensRenderizar = mediacoesAcompanhamento.filter((item) => {
+          if (item.situacao_mediacao !== "concluida") return false;
           const dataSolicitacao = item.data_solicitacao ? new Date(item.data_solicitacao) : null;
           if (!dataSolicitacao) return false;
           const mesItem = String(dataSolicitacao.getMonth() + 1).padStart(2, '0');
@@ -1790,11 +2221,8 @@
         document.querySelectorAll(".btn-ver-detalhes").forEach((btn) => {
           btn.addEventListener("click", async () => {
             const itemId = btn.dataset.itemId;
-            const item = devolucoes.find((d) => d.id === Number(itemId));
-            if (item) {
-              document.getElementById("modalPainelFlutuante").close();
-              await abrirDetalhe(Number(itemId));
-            }
+            document.getElementById("modalPainelFlutuante").close();
+            await abrirDetalhe(Number(itemId));
           });
         });
       }

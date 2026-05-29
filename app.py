@@ -4,8 +4,10 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import urlencode
@@ -21,7 +23,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_PATH = ROOT_DIR / ".env"
 DB_PATH = ROOT_DIR / "data" / "devolucoes.sqlite"
 UPLOAD_DIR = ROOT_DIR / "uploads"
-ML_CLASSIFIER_VERSION = "actions-v20"
+ML_CLASSIFIER_VERSION = "actions-v27"
 ML_CLOSED_TOUCH_GAP_HOURS = 24
 
 
@@ -74,6 +76,9 @@ STATUS_PERMITIDOS = {
     "nao_recebido",
 }
 
+MEDIATION_TRACKING_STATUSES = {"contestacao_aberta", "aguardando_plataforma", "divergencia_encontrada"}
+MEDIATION_FINAL_STATUSES = {"aprovado", "parcial", "reprovado"}
+
 env = {**os.environ, **dotenv_values(ENV_PATH)}
 
 app = Flask(__name__)
@@ -87,6 +92,67 @@ PIN_MERCADO_LIVRE = env.get("PIN_MERCADO_LIVRE", "1234")
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def mediation_result_from_resolution(claim_status: str, resolution: dict | None) -> tuple[str, str]:
+    status = str(claim_status or "").lower()
+    resolution = resolution or {}
+    reason = str(resolution.get("reason") or "").lower()
+    benefited = [str(value or "").lower() for value in (resolution.get("benefited") or [])]
+    benefited_set = set(benefited)
+
+    if status != "closed":
+        return "aguardando_plataforma", "Mediacao em processamento pelo Mercado Livre."
+
+    if "respondent" in benefited_set and "complainant" in benefited_set:
+        return "parcial", f"Mediacao concluida no Mercado Livre (resolucao: {reason or 'sem motivo informado'})."
+    if "respondent" in benefited_set:
+        return "aprovado", f"Mediacao concluida a favor do vendedor (resolucao: {reason or 'sem motivo informado'})."
+    if "complainant" in benefited_set:
+        return "reprovado", f"Mediacao concluida a favor do comprador (resolucao: {reason or 'sem motivo informado'})."
+    if reason == "partial_refunded":
+        return "parcial", "Mediacao concluida com reembolso parcial no Mercado Livre."
+    return "encerrado", f"Mediacao encerrada no Mercado Livre (resolucao: {reason or 'sem motivo informado'})."
+
+
+def review_payload_has_pending_seller_action(reviews_payload: list | str | None) -> bool:
+    data = reviews_payload
+    if isinstance(data, str):
+        try:
+            data = json.loads(data or "[]")
+        except Exception:
+            data = []
+    if not isinstance(data, list):
+        return False
+    for review in data:
+        for resource_review in (review or {}).get("resource_reviews") or []:
+            seller_status = str((resource_review or {}).get("seller_status") or "").lower()
+            stage = str((resource_review or {}).get("stage") or "").lower()
+            if seller_status == "pending" or stage == "seller_review_pending":
+                return True
+    return False
+
+
+@lru_cache(maxsize=4096)
+def ml_claim_return_cost(claim_id: str) -> float:
+    claim_id = str(claim_id or "").strip()
+    if not claim_id:
+        return 0.0
+    try:
+        payload = ml_get(f"/post-purchase/v1/claims/{claim_id}/charges/return-cost")
+        return round(abs(float((payload or {}).get("amount") or 0.0)), 2)
+    except Exception:
+        return 0.0
+
+
+def resolved_return_fee(item: dict) -> float:
+    fee = round(abs(float(item.get("ml_tarifa_devolucao") or 0.0)), 2)
+    if fee > 0:
+        return fee
+    claim_id = str(item.get("ml_claim_id") or "").strip()
+    if claim_id:
+        return ml_claim_return_cost(claim_id)
+    return 0.0
 
 
 def db() -> sqlite3.Connection:
@@ -510,6 +576,56 @@ def lookup_matches(query: str, *values: str | int | None) -> bool:
     return False
 
 
+def extract_order_id_from_shipment(shipment: dict, shipment_id: str) -> str:
+    shipment = shipment or {}
+    direct_candidates = [
+        shipment.get("order_id"),
+        shipment.get("resource_id"),
+        ((shipment.get("order") or {}).get("id") if isinstance(shipment.get("order"), dict) else None),
+    ]
+    for candidate in direct_candidates:
+        candidate_str = str(candidate or "").strip()
+        if candidate_str:
+            return candidate_str
+
+    orders = shipment.get("orders")
+    if isinstance(orders, list):
+        for order in orders:
+            order_id = ""
+            if isinstance(order, dict):
+                order_id = str(order.get("id") or order.get("order_id") or "").strip()
+            else:
+                order_id = str(order or "").strip()
+            if order_id:
+                return order_id
+
+    try:
+        items = ml_get(f"/shipments/{shipment_id}/items")
+    except Exception:
+        return ""
+
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            order_id = str(item.get("order_id") or "").strip()
+            if order_id:
+                return order_id
+    return ""
+
+
+def find_order_by_shipment_identifier(identifier: str) -> tuple[dict, str]:
+    shipment = ml_get(f"/shipments/{identifier}")
+    order_id = extract_order_id_from_shipment(shipment, identifier)
+    if not order_id:
+        raise RuntimeError(f"Mercado Livre respondeu 404: shipment {identifier} sem order_id")
+    order = ml_get(f"/orders/{order_id}")
+    shipment_pack_id = str((shipment or {}).get("pack_id") or "").strip()
+    if shipment_pack_id and not order.get("pack_id"):
+        order["pack_id"] = shipment_pack_id
+    return order, "shipment"
+
+
 def ml_error_response(exc: Exception, pedido_id: str) -> tuple[dict, int]:
     message = str(exc)
     if "404" in message or "order_not_found" in message:
@@ -565,7 +681,7 @@ def map_ml_status(claim: dict, retorno: dict | None) -> str:
     if "delivered" in return_status or "received" in return_status:
         return "produto_recebido"
     if "dispute" in stage:
-        return "contestacao_aberta"
+        return "aguardando_plataforma"
     return "aguardando_produto"
 
 
@@ -837,6 +953,7 @@ def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
         retorno = None
     return_id = (retorno or {}).get("id")
     reviews_payload = ml_return_reviews(return_id, sync_run_id, claim_id)
+    reviews_list = (reviews_payload or {}).get("reviews") or []
     if resource_id:
         try:
             order = ml_get(f"/orders/{resource_id}")
@@ -855,6 +972,7 @@ def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
     order_tags = set((order or {}).get("tags") or [])
     full_ml = logistic_type == "fulfillment" or destination == "warehouse" or (bool((order or {}).get("fulfilled")) and "d2c" not in order_tags)
     seller_status = str((retorno or {}).get("seller_status") or "").lower()
+    claim_status = str(claim.get("status") or "").lower()
     actions = set(action_names(claim))
     review_actions = {"return_review_ok", "return_review_fail", "return_review_unified_ok", "return_review_unified_fail"}
     has_review_action = bool(actions.intersection(review_actions))
@@ -885,6 +1003,14 @@ def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
             picture = ""
 
     proxima_atender = return_status in {"label_generated", "delivered", "received"} or precisa_revisao
+    return_cost = ml_claim_return_cost(str(claim_id or ""))
+    full_review_pending = (
+        full_ml
+        and claim_status == "closed"
+        and return_status == "delivered"
+        and "return_review_fail" in actions
+        and review_payload_has_pending_seller_action(reviews_list)
+    )
 
     if ml_review_locked:
         prioridade = "full_ml" if full_ml else "outros_problemas"
@@ -965,7 +1091,9 @@ def build_ml_devolucao(claim: dict, sync_run_id: int | None = None) -> dict:
         "chegada_status": "",
         "mediacao_mensagem": "",
         "ml_ativo": 1 if proxima_atender else 0,
-        "ml_tarifa_devolucao": extract_tarifa_devolucao(retorno),
+        "ml_tarifa_devolucao": return_cost if return_cost > 0 else extract_tarifa_devolucao(retorno),
+        "_full_review_pending": full_review_pending,
+        "_claim_resolution": claim.get("resolution") or {},
         **financials,
     }
 
@@ -1047,16 +1175,22 @@ def find_order_by_identifier(identifier: str) -> tuple[dict, str]:
         if "404" not in str(exc) and "order_not_found" not in str(exc):
             raise
 
-    pack = ml_get(f"/packs/{identifier}")
-    orders = pack.get("orders") or []
-    if not orders:
-        raise RuntimeError(f"Mercado Livre respondeu 404: pack {identifier} sem pedidos vinculados")
-    order_id = str(orders[0].get("id") or "")
-    if not order_id:
-        raise RuntimeError(f"Mercado Livre respondeu 404: pack {identifier} sem order_id")
-    order = ml_get(f"/orders/{order_id}")
-    order["pack_id"] = order.get("pack_id") or pack.get("id") or identifier
-    return order, "pack"
+    try:
+        pack = ml_get(f"/packs/{identifier}")
+        orders = pack.get("orders") or []
+        if not orders:
+            raise RuntimeError(f"Mercado Livre respondeu 404: pack {identifier} sem pedidos vinculados")
+        order_id = str(orders[0].get("id") or "")
+        if not order_id:
+            raise RuntimeError(f"Mercado Livre respondeu 404: pack {identifier} sem order_id")
+        order = ml_get(f"/orders/{order_id}")
+        order["pack_id"] = order.get("pack_id") or pack.get("id") or identifier
+        return order, "pack"
+    except Exception as exc:
+        if "404" not in str(exc) and "pack" not in str(exc).lower():
+            raise
+
+    return find_order_by_shipment_identifier(identifier)
 
 
 def find_claim_by_tracking(identifier: str) -> dict:
@@ -1231,6 +1365,31 @@ def claim_return_info(claim_id: int | str) -> dict:
         "product_condition": "",
         "orders": [],
         "related_entities": [],
+    }
+
+
+def normalized_ml_text(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+@lru_cache(maxsize=4096)
+def claim_attention_detail(claim_id: str, claim_last_updated: str = "") -> dict:
+    cid = str(claim_id or "").strip()
+    if not cid:
+        return {"title": "", "action_responsible": "", "due_date": "", "problem": ""}
+    try:
+        detail = ml_get(f"/post-purchase/v1/claims/{cid}/detail")
+    except Exception:
+        return {"title": "", "action_responsible": "", "due_date": "", "problem": ""}
+    return {
+        "title": normalized_ml_text(detail.get("title")),
+        "action_responsible": normalized_ml_text(detail.get("action_responsible")),
+        "due_date": str(detail.get("due_date") or ""),
+        "problem": normalized_ml_text(detail.get("problem")),
     }
 
 
@@ -1458,8 +1617,10 @@ def ml_live_claims_for_queue(user_id: str, *, max_pages: int = 3) -> tuple[list[
     seen: set[str] = set()
     declared: dict[str, int] = {}
     searches = [("returns", "opened", max_pages)]
-    searches.append(("mediations", "opened", env_int("ML_SYNC_MAX_PAGES_MEDIATIONS", 3)))
-    searches.append(("mediations", "closed", env_int("ML_SYNC_MAX_PAGES_CLOSED_PICKUP_SCAN", 20)))
+    searches.append(("returns", "closed", env_int("ML_LIVE_QUEUE_CLOSED_RETURNS_PAGES", 2)))
+    searches.append(("mediations", "opened", env_int("ML_LIVE_QUEUE_MAX_PAGES_MEDIATIONS", 2)))
+    closed_mediations_pages = max(6, env_int("ML_LIVE_QUEUE_CLOSED_MEDIATIONS_PAGES", 5))
+    searches.append(("mediations", "closed", closed_mediations_pages))
     for claim_type, status_filter, pages in searches:
         batch, total = ml_claims_search(
             user_id,
@@ -1470,11 +1631,8 @@ def ml_live_claims_for_queue(user_id: str, *, max_pages: int = 3) -> tuple[list[
         )
         declared[f"{claim_type}_{status_filter}"] = total
         for claim in batch:
-            # Em mediacoes fechadas, buscamos apenas candidatos reais do fluxo
-            # "retirar no correio" (return_review_ok com due_date).
-            if claim_type == "mediations" and status_filter == "closed":
-                if not claim_has_action_with_due_date(claim, "return_review_ok"):
-                    continue
+            # Mantemos mediacoes fechadas recentes no cache para classificar
+            # corretamente "outros problemas" (ex.: devolucao em revisao).
             claim_id = str(claim.get("id") or "")
             if claim_id and claim_id not in seen:
                 seen.add(claim_id)
@@ -1518,8 +1676,32 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
     claim_type = str(claim.get("type") or "").lower()
     claim_status = str(claim.get("status") or "").lower()
     claim_stage = str(claim.get("stage") or "").lower()
+    claim_id = str(claim.get("id") or "")
+    review_actions = {"return_review_unified_ok", "return_review_unified_fail", "return_review_ok", "return_review_fail"}
+    # Evita chamadas caras de detail para todo o universo de claims:
+    # busca detail apenas quando ele realmente decide o bucket.
+    needs_attention_detail = (
+        bool(actions.intersection(review_actions))
+        or ("send_message_to_mediator" in actions)
+        or (destination == "warehouse" and return_status == "delivered" and shipment_status == "delivered")
+    )
+    attention = claim_attention_detail(claim_id, str(claim.get("last_updated") or "")) if needs_attention_detail else {}
+    attention_title = str(attention.get("title") or "")
+    attention_responsible = str(attention.get("action_responsible") or "")
 
-    # "Retirar no correio" (filtro urgente ML): revisao do retorno com prazo curto.
+    # "Retirar no correio": prioriza sinal explicito do proprio detalhe do ML.
+    # Ex.: "Devolucao para retirar na Correios ate ...".
+    if (
+        "retirar na correios" in attention_title
+        and attention_responsible in {"respondent", "seller"}
+        and destination == "seller_address"
+        and return_status in {"label_generated", "shipped", "delivered"}
+        and shipment_status in {"ready_to_ship", "shipped", "delivered"}
+    ):
+        return "para_retirar", f"detail_pickup_correios:{return_status}:{shipment_status}:{destination}"
+
+    # Fallback para "retirar no correio" via acao de revisao com prazo.
+    # Mantemos estrito: so entra se o titulo do ML indicar retirada na Correios.
     pickup_action = next(
         (
             action
@@ -1528,30 +1710,55 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
         ),
         None,
     )
-    if pickup_action and claim_type == "mediations" and claim_status == "closed" and claim_stage == "dispute":
+    if pickup_action:
         due = parse_ml_datetime(str(pickup_action.get("due_date") or ""))
-        now_utc = datetime.now(timezone.utc)
-        window_days = max(1, env_int("ML_CORREIOS_PICKUP_WINDOW_DAYS", 3))
         if (
             due
             and bool(pickup_action.get("mandatory"))
+            and "retirar na correios" in attention_title
             and destination == "seller_address"
-            and return_status in {"shipped", "delivered"}
-            and shipment_status in {"shipped", "delivered"}
-            and due <= (now_utc + timedelta(days=window_days))
+            and return_status in {"label_generated", "shipped", "delivered"}
+            and shipment_status in {"ready_to_ship", "shipped", "delivered"}
         ):
             return "para_retirar", "seller_pickup_review_due:return_review_ok"
 
-    review_actions = {"return_review_unified_ok", "return_review_unified_fail", "return_review_ok", "return_review_fail"}
     has_review = bool(actions.intersection(review_actions))
     return_related = return_info.get("related_entities") or []
     already_reviewed = "reviews" in return_related
     if has_review and not already_reviewed:
+        # Em FULL/warehouse com devolucao ainda em transito ("devolucao com data atualizada"),
+        # o ML ainda esta conduzindo a revisao e nao deve entrar em "para sua revisao".
+        if destination == "warehouse" and return_status == "shipped" and shipment_status in {"shipped", "ready_to_ship"}:
+            return "fora_da_fila", f"return_updated_date_in_transit:{return_status}:{shipment_status}:{destination}"
+        if "devolucao com data atualizada" in attention_title:
+            return "fora_da_fila", f"return_updated_date_title:{attention_responsible}:{return_status}:{shipment_status}"
         return "para_revisao", "seller_available_action:return_review"
 
     if "send_message_to_mediator" in actions:
         mediation_like = claim_type == "mediations" or claim_stage == "dispute"
         if mediation_like:
+            # Casos equivalentes aos que o ML mostra em "Outros problemas":
+            # devolucao em revisao conduzida pelo mediador.
+            if (
+                destination == "warehouse"
+                and return_status == "delivered"
+                and shipment_status == "delivered"
+                and "devolucao em revisao" in attention_title
+                and attention_responsible == "mediator"
+            ):
+                return "outros_problemas", f"ml_internal_review_waiting_mediator:{return_status}:{shipment_status}:{destination}"
+            # Casos de "devolucao em revisao / data atualizada" no ML nao entram em "Proximas a serem atendidas".
+            # Ex.: retorno entregue no warehouse, revisao interna da plataforma.
+            if (
+                destination == "warehouse"
+                and return_status in {"delivered", "expired"}
+                and shipment_status in {"delivered", "cancelled"}
+            ):
+                return "fora_da_fila", f"ml_internal_review_or_updated_date:{return_status}:{shipment_status}:{destination}"
+            if destination == "seller_address" and return_status == "expired" and shipment_status == "cancelled":
+                return "fora_da_fila", f"mediation_waiting_ml_resolution:{return_status}:{shipment_status}:{destination}"
+            if attention_responsible in {"complainant", "mediator"} and "mediacao em espera de resposta do mercado livre" in attention_title:
+                return "fora_da_fila", f"ml_waiting_platform_response:{attention_responsible}:{return_status}:{shipment_status}"
             if return_status in {"", "label_generated", "failed"}:
                 return "fora_da_fila", f"mediation_message_to_mediator_not_next_attention:{return_status}:{shipment_status}:{destination}"
             return "outros_problemas", "seller_available_action:send_message_to_mediator"
@@ -1563,7 +1770,14 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
         and claim_touched_after_resolution(claim)
         and return_status == "delivered"
     ):
-        return "outros_problemas", "closed_touched_with_return_delivered"
+        if (
+            destination == "warehouse"
+            and shipment_status == "delivered"
+            and "devolucao em revisao" in attention_title
+            and attention_responsible == "mediator"
+        ):
+            return "outros_problemas", f"ml_internal_review_waiting_mediator:{return_status}:{shipment_status}:{destination}"
+        return "fora_da_fila", "closed_resolved_not_next_attention"
 
     if return_status == "label_generated":
         return "fora_da_fila", f"return_label_generated_not_target_filter:{shipment_status}:{destination}"
@@ -1572,6 +1786,14 @@ def classify_ml_live_queue_claim(claim: dict, return_info: dict) -> tuple[str, s
         return "fora_da_fila", f"return_problem_status_not_target_filter:{return_status}:{shipment_status}:{destination}"
     if claim_type == "returns" and return_status in {"label_generated", "shipped", "in_return", "processing"}:
         return "fora_da_fila", f"return_in_progress_not_next_attention:{return_status}:{shipment_status}:{destination}"
+    if (
+        destination == "warehouse"
+        and return_status == "delivered"
+        and shipment_status == "delivered"
+        and "devolucao em revisao" in attention_title
+        and attention_responsible == "mediator"
+    ):
+        return "outros_problemas", f"ml_internal_review_waiting_mediator:{return_status}:{shipment_status}:{destination}"
     return "fora_da_fila", f"no_matching_queue_rule:{return_status}:{shipment_status}"
 
 
@@ -1751,8 +1973,19 @@ def inspect_claim_for_queue(claim: dict, *, use_cache: bool = True) -> tuple[dic
     bucket, rule = classify_ml_live_queue_claim(detail, return_info)
     orders = return_info.get("orders") or []
     order_ids = [str(order.get("order_id")) for order in orders if order.get("order_id")]
-    order_payload = fetch_order_for_claim(detail, return_info)
-    visuals = order_visuals(order_payload, claim_id)
+    # Performance: fora da fila nao precisa enriquecer com order/item (muito custoso).
+    if bucket == "fora_da_fila":
+        visuals = {
+            "produto_nome": "",
+            "produto_imagem": "",
+            "valor_pago": 0.0,
+            "taxa_venda": 0.0,
+            "ml_tipo_logistica": "",
+            "pack_id": "",
+        }
+    else:
+        order_payload = fetch_order_for_claim(detail, return_info)
+        visuals = order_visuals(order_payload, claim_id)
     action_meta = bucket_action_meta(detail, bucket)
     reason_id = detail.get("reason_id")
     item = {
@@ -1961,7 +2194,7 @@ def opened_claims_for_next_attendance(user_id: str, sync_run_id: int | None = No
 
 def refresh_ml_classification_cache(user_id: str, sync_run_id: int | None = None, trace_id: str | None = None) -> dict:
     started = perf_counter()
-    claims, declared = ml_live_claims_for_queue(user_id, max_pages=env_int("ML_SYNC_MAX_PAGES_OPENED", 10))
+    claims, declared = ml_live_claims_for_queue(user_id, max_pages=env_int("ML_LIVE_QUEUE_MAX_PAGES", 3))
     active_ids: set[str] = set()
     rows: list[dict] = []
     cache_hits = 0
@@ -2006,6 +2239,37 @@ def refresh_ml_classification_cache(user_id: str, sync_run_id: int | None = None
         "resumo": resumo,
     }
     add_ml_trace_event(trace_id, sync_run_id, "classification_cache_refresh", status="ok" if not errors else "partial", details=result, started_at=started)
+    return result
+
+
+def refresh_local_mediations(sync_run_id: int, trace_id: str) -> dict:
+    started = perf_counter()
+    with db() as conn:
+        tracked_rows = conn.execute(
+            """
+            SELECT DISTINCT ml_claim_id
+            FROM devolucoes
+            WHERE ml_claim_id IS NOT NULL
+              AND TRIM(ml_claim_id) <> ''
+              AND (
+                status IN ('aguardando_plataforma', 'contestacao_aberta', 'divergencia_encontrada', 'aprovado', 'parcial', 'reprovado')
+                OR COALESCE(mediacao_mensagem, '') <> ''
+              )
+            """
+        ).fetchall()
+    claim_ids = [str(row["ml_claim_id"]) for row in tracked_rows if row["ml_claim_id"]]
+    updated = 0
+    errors: list[str] = []
+    for claim_id in claim_ids:
+        try:
+            claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+            item = build_ml_devolucao(claim, sync_run_id)
+            upsert_ml_devolucao(item)
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{claim_id}: {exc}")
+    result = {"monitorados": len(claim_ids), "atualizados": updated, "erros": errors[:10]}
+    add_ml_trace_event(trace_id, sync_run_id, "mediation_tracking_refresh", status="ok" if not errors else "partial", details=result, started_at=started)
     return result
 
 
@@ -2060,18 +2324,96 @@ def upsert_ml_devolucao(item: dict) -> str:
                 "SELECT * FROM devolucoes WHERE ml_claim_id = ? LIMIT 1",
                 [item["ml_claim_id"]],
             ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM devolucoes WHERE marketplace = 'Mercado Livre' AND pedido_id = ? AND COALESCE(ml_claim_id, '') = '' LIMIT 1",
+                    [item["pedido_id"]],
+                ).fetchone()
         else:
             row = conn.execute(
                 "SELECT * FROM devolucoes WHERE marketplace = 'Mercado Livre' AND pedido_id = ? LIMIT 1",
                 [item["pedido_id"]],
             ).fetchone()
         if row:
+            if row["ml_claim_id"] and not item.get("ml_claim_id"):
+                item["ml_claim_id"] = row["ml_claim_id"]
+                preserve_fields = [
+                    "ml_status",
+                    "ml_stage",
+                    "ml_return_status",
+                    "ml_return_id",
+                    "ml_return_subtype",
+                    "ml_status_money",
+                    "ml_refund_at",
+                    "ml_seller_status",
+                    "ml_seller_reason",
+                    "ml_product_condition",
+                    "ml_return_reviews",
+                    "ml_destino_devolucao",
+                    "ml_tipo_logistica",
+                ]
+                for field in preserve_fields:
+                    incoming = item.get(field)
+                    if incoming in (None, "", "[]", 0, 0.0) and row[field] not in (None, ""):
+                        item[field] = row[field]
             same_claim = str(row["ml_claim_id"] or "") == str(item.get("ml_claim_id") or "")
             local_expected_closed = row["status"] == "sem_divergencia" or row["chegada_status"] == "esperado"
             remote_still_requires_action = int(item.get("requer_acao") or 0) == 1
+            full_review_pending = bool(item.get("_full_review_pending")) or review_payload_has_pending_seller_action(item.get("ml_return_reviews"))
             should_keep_local_final = row["status"] in {"aprovado", "parcial", "reprovado"} or (
                 local_expected_closed and not remote_still_requires_action
             )
+            if full_review_pending:
+                should_keep_local_final = False
+            local_mediation_tracking = (
+                row["status"] in MEDIATION_TRACKING_STATUSES
+                or row["status"] in MEDIATION_FINAL_STATUSES
+                or bool(str(row["mediacao_mensagem"] or "").strip())
+            )
+            if same_claim and full_review_pending:
+                item["status"] = "produto_recebido"
+                item["requer_acao"] = 1
+                item["ml_ativo"] = 1
+                item["valor_recuperado"] = 0.0
+                item["valor_perdido"] = 0.0
+                item["observacao_final"] = "Devolucao revisada pelo Mercado Livre (Full) com apelo pendente do vendedor."
+            claim_status = str(item.get("ml_status") or "").lower()
+            resolution = item.get("_claim_resolution") or {}
+            if same_claim and local_mediation_tracking and not full_review_pending:
+                mediation_status, mediation_note = mediation_result_from_resolution(claim_status, resolution)
+                if claim_status == "closed":
+                    item["status"] = mediation_status
+                    item["requer_acao"] = 0
+                    item["ml_ativo"] = 0
+                    item["observacao_final"] = mediation_note
+                    item["ml_tarifa_devolucao"] = resolved_return_fee(item)
+                    base_valor = float(item.get("valor_produto") or 0)
+                    if mediation_status == "aprovado":
+                        item["valor_recuperado"] = base_valor
+                        item["valor_perdido"] = 0.0
+                    elif mediation_status == "reprovado":
+                        item["valor_recuperado"] = 0.0
+                        item["valor_perdido"] = base_valor
+                    elif mediation_status == "parcial":
+                        pago = float(item.get("ml_valor_pago") or base_valor)
+                        reembolsado = float(item.get("ml_valor_reembolsado") or 0)
+                        recuperado = max(0.0, round(pago - reembolsado, 2))
+                        item["valor_recuperado"] = recuperado
+                        item["valor_perdido"] = max(0.0, round(base_valor - recuperado, 2))
+                    if row["status"] in MEDIATION_FINAL_STATUSES and row["status"] != "encerrado":
+                        item["status"] = row["status"]
+                        item["valor_recuperado"] = row["valor_recuperado"]
+                        item["valor_perdido"] = row["valor_perdido"]
+                        item["observacao_final"] = row["observacao_final"] or item["observacao_final"]
+                        item["ml_tarifa_devolucao"] = row["ml_tarifa_devolucao"]
+                else:
+                    item["status"] = "aguardando_plataforma"
+                    item["requer_acao"] = 0
+                    item["ml_ativo"] = 0
+                    item["ml_tarifa_devolucao"] = 0.0
+                    item["valor_recuperado"] = 0.0
+                    item["valor_perdido"] = 0.0
+                    item["observacao_final"] = "Mediacao em processamento no Mercado Livre."
             if same_claim and should_keep_local_final:
                 item["status"] = row["status"]
                 item["chegada_status"] = row["chegada_status"] or item.get("chegada_status", "")
@@ -2237,6 +2579,31 @@ def api_listar_devolucoes():
     return jsonify([dict(row) for row in rows])
 
 
+@app.get("/api/devolucoes/mediacoes")
+def api_listar_mediacoes():
+    require_login()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.*
+            FROM devolucoes d
+            WHERE (
+                d.status IN ('aguardando_plataforma', 'contestacao_aberta', 'aprovado', 'parcial', 'reprovado')
+                OR COALESCE(d.mediacao_mensagem, '') <> ''
+                OR EXISTS (SELECT 1 FROM contestacoes c WHERE c.devolucao_id = d.id)
+            )
+            ORDER BY datetime(COALESCE(d.ultima_sincronizacao_ml, d.data_solicitacao)) DESC
+            """
+        ).fetchall()
+    payload = []
+    for row in rows:
+        data = dict(row)
+        status = str(data.get("status") or "").lower()
+        data["situacao_mediacao"] = "concluida" if status in MEDIATION_FINAL_STATUSES else "processando"
+        payload.append(data)
+    return jsonify(payload)
+
+
 @app.post("/api/devolucoes")
 def api_criar_devolucao():
     require_login()
@@ -2282,19 +2649,39 @@ def api_importar_pedido():
     try:
         item = build_devolucao_from_identifier(raw_identifier)
         existing = existing_ml_devolucao(item)
+        if existing and existing["ml_claim_id"] and not item.get("ml_claim_id"):
+            # Evita empobrecer um caso já vinculado a claim quando a busca por pedido
+            # retorna apenas dados de order sem mediação embutida.
+            try:
+                claim = ml_get(f"/post-purchase/v1/claims/{existing['ml_claim_id']}")
+                item = build_ml_devolucao(claim)
+                if pedido_id:
+                    item["pedido_id"] = str(pedido_id)
+            except Exception:
+                pass
         if existing:
             item["ml_ativo"] = int(existing["ml_ativo"] if existing["ml_ativo"] is not None else 1)
             item["chegada_status"] = existing["chegada_status"] or item.get("chegada_status", "")
             item["mediacao_mensagem"] = existing["mediacao_mensagem"] or item.get("mediacao_mensagem", "")
-            if existing["status"] in {"sem_divergencia", "aprovado", "parcial", "reprovado", "encerrado"}:
+            if existing["status"] in {"sem_divergencia", "aprovado", "parcial", "reprovado", "encerrado"} and not item.get("_full_review_pending"):
                 item["status"] = existing["status"]
                 item["requer_acao"] = existing["requer_acao"]
+                item["ml_ativo"] = 0
         action = upsert_ml_devolucao(item)
         with db() as conn:
-            row = conn.execute(
-                "SELECT * FROM devolucoes WHERE marketplace = 'Mercado Livre' AND pedido_id = ? LIMIT 1",
-                [item["pedido_id"]],
-            ).fetchone()
+            row = None
+            if item.get("ml_claim_id"):
+                row = conn.execute(
+                    "SELECT * FROM devolucoes WHERE ml_claim_id = ? LIMIT 1",
+                    [item["ml_claim_id"]],
+                ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM devolucoes WHERE marketplace = 'Mercado Livre' AND pedido_id = ? LIMIT 1",
+                    [item["pedido_id"]],
+                ).fetchone()
+            if not row and existing:
+                row = conn.execute("SELECT * FROM devolucoes WHERE id = ? LIMIT 1", [existing["id"]]).fetchone()
         return jsonify({"mensagem": "Pedido importado", "action": action, "devolucao": dict(row)})
     except Exception as exc:
         payload, status_code = ml_error_response(exc, pedido_id or raw_identifier)
@@ -2488,14 +2875,15 @@ def api_sincronizar_ml():
             details={
                 "tipo": "classification_cache",
                 "user_id": user_id,
-                "max_pages": env_int("ML_SYNC_MAX_PAGES_OPENED", 10),
+                "max_pages": env_int("ML_LIVE_QUEUE_MAX_PAGES", 3),
                 "closed_returns_pages": env_int("ML_LIVE_QUEUE_CLOSED_RETURNS_PAGES", 2),
-                "closed_mediations_pages": env_int("ML_LIVE_QUEUE_CLOSED_MEDIATIONS_PAGES", 5),
+                "closed_mediations_pages": max(6, env_int("ML_LIVE_QUEUE_CLOSED_MEDIATIONS_PAGES", 5)),
                 "sort": "last_updated:desc",
                 "workers": ml_worker_count("ML_LIVE_QUEUE_WORKERS", 4),
             },
         )
         cache_result = refresh_ml_classification_cache(user_id, sync_run_id, trace_id)
+        mediations_result = refresh_local_mediations(sync_run_id, trace_id)
         resumo = cache_result["resumo"]
         resumo["fonte"] = "mercado_livre_cache_classificacao"
         add_ml_trace_event(
@@ -2551,6 +2939,7 @@ def api_sincronizar_ml():
                 "atualizadas": cache_result["cache_misses"],
                 "erros": cache_result["erros"],
                 "resumo": resumo,
+                "mediacoes_monitoradas": mediations_result,
                 "debug": {
                     "para_revisao": bucket_breakdown.get("para_revisao", 0),
                     "para_retirar": bucket_breakdown.get("para_retirar", 0),
@@ -2702,6 +3091,18 @@ def api_chegada(item_id: int):
             "UPDATE devolucoes SET chegada_status = ?, status = ?, requer_acao = ?, ml_ativo = ? WHERE id = ?",
             [resultado, novo_status, 0 if resultado == "esperado" else 1, ml_ativo, item_id],
         )
+        if resultado == "esperado" and item["ml_claim_id"]:
+            conn.execute(
+                """
+                UPDATE ml_claim_classifications
+                SET bucket = 'fora_da_fila',
+                    regra = 'local_expected_closed',
+                    active = 1,
+                    updated_at = ?
+                WHERE claim_id = ?
+                """,
+                [now_iso(), str(item["ml_claim_id"])],
+            )
         conn.execute(
             "INSERT INTO historico_status (devolucao_id, status_anterior, status_novo, data_alteracao) VALUES (?, ?, ?, ?)",
             [item_id, item["status"], novo_status, now_iso()],
@@ -2777,9 +3178,14 @@ def api_gerar_mediacao(item_id: int):
         checklist = row_to_dict(conn.execute("SELECT * FROM checklists WHERE devolucao_id = ?", [item_id]).fetchone())
         evidencias = [dict(row) for row in conn.execute("SELECT * FROM evidencias WHERE devolucao_id = ? ORDER BY id DESC", [item_id]).fetchall()]
         mensagem = gerar_mensagem_mediacao(devolucao, checklist, evidencias)
+        status_anterior = devolucao.get("status") or ""
         conn.execute(
-            "UPDATE devolucoes SET mediacao_mensagem = ?, status = 'contestacao_aberta' WHERE id = ?",
-            [mensagem, item_id],
+            "UPDATE devolucoes SET mediacao_mensagem = ?, status = 'aguardando_plataforma', requer_acao = 0, ml_ativo = 0, observacao_final = ? WHERE id = ?",
+            [mensagem, "Mediacao em processamento no Mercado Livre.", item_id],
+        )
+        conn.execute(
+            "INSERT INTO historico_status (devolucao_id, status_anterior, status_novo, data_alteracao) VALUES (?, ?, ?, ?)",
+            [item_id, status_anterior, "aguardando_plataforma", now_iso()],
         )
         conn.execute(
             """
@@ -2967,7 +3373,15 @@ def api_create_contestacao(item_id: int):
                 now_iso(),
             ],
         )
-        conn.execute("UPDATE devolucoes SET status = 'contestacao_aberta' WHERE id = ?", [item_id])
+        status_anterior = devolucao.get("status") or ""
+        conn.execute(
+            "UPDATE devolucoes SET status = 'aguardando_plataforma', requer_acao = 0, ml_ativo = 0, observacao_final = ? WHERE id = ?",
+            ["Mediacao em processamento no Mercado Livre.", item_id],
+        )
+        conn.execute(
+            "INSERT INTO historico_status (devolucao_id, status_anterior, status_novo, data_alteracao) VALUES (?, ?, ?, ?)",
+            [item_id, status_anterior, "aguardando_plataforma", now_iso()],
+        )
         row = conn.execute("SELECT * FROM contestacoes WHERE id = ?", [cur.lastrowid]).fetchone()
     return jsonify(dict(row)), 201
 
@@ -2980,10 +3394,19 @@ def api_resultado_contestacao(item_id: int, contestacao_id: int):
     if resultado not in {"aprovado", "parcial", "reprovado"}:
         return jsonify({"mensagem": "Resultado invalido"}), 400
     with db() as conn:
+        atual = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
+        tarifa = resolved_return_fee(atual or {})
         conn.execute("UPDATE contestacoes SET status = ?, data_resultado = ? WHERE id = ?", [resultado, now_iso(), contestacao_id])
         conn.execute(
-            "UPDATE devolucoes SET status = ?, valor_recuperado = ?, valor_perdido = ?, observacao_final = ? WHERE id = ?",
-            [resultado, float(data.get("valor_recuperado") or 0), float(data.get("valor_perdido") or 0), data.get("observacao_final", ""), item_id],
+            "UPDATE devolucoes SET status = ?, valor_recuperado = ?, valor_perdido = ?, observacao_final = ?, requer_acao = 0, ml_ativo = 0, ml_tarifa_devolucao = ? WHERE id = ?",
+            [
+                resultado,
+                float(data.get("valor_recuperado") or 0),
+                float(data.get("valor_perdido") or 0),
+                data.get("observacao_final", ""),
+                tarifa,
+                item_id,
+            ],
         )
     return jsonify({"mensagem": "Resultado salvo"})
 

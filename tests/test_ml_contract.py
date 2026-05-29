@@ -28,6 +28,70 @@ class MercadoLivreContractTests(unittest.TestCase):
         self.assertEqual(app.ml_return_shipments({"shipment": {"id": "s3"}})[0]["id"], "s3")
         self.assertEqual(app.ml_return_shipments({}), [{}])
 
+    def test_find_order_by_identifier_accepts_scanner_shipment_code(self):
+        scanner_code = "47116235431"
+        expected_order_id = "2000012996763513"
+
+        def fake_ml_get(path, params=None):
+            if path == f"/orders/{scanner_code}":
+                raise RuntimeError("Mercado Livre respondeu 404: order_not_found")
+            if path == f"/packs/{scanner_code}":
+                raise RuntimeError("Mercado Livre respondeu 404: pack_not_found")
+            if path == f"/shipments/{scanner_code}":
+                return {"id": int(scanner_code), "order_id": int(expected_order_id)}
+            if path == f"/orders/{expected_order_id}":
+                return {"id": int(expected_order_id), "status": "paid"}
+            raise AssertionError(f"endpoint inesperado: {path}")
+
+        with patch.object(app, "ml_get", side_effect=fake_ml_get):
+            order, source = app.find_order_by_identifier(scanner_code)
+
+        self.assertEqual(source, "shipment")
+        self.assertEqual(str(order["id"]), expected_order_id)
+
+    def test_find_order_by_shipment_identifier_fallbacks_to_items_endpoint(self):
+        scanner_code = "47116235431"
+        expected_order_id = "2000012996763513"
+
+        def fake_ml_get(path, params=None):
+            if path == f"/shipments/{scanner_code}":
+                return {"id": int(scanner_code)}
+            if path == f"/shipments/{scanner_code}/items":
+                return [{"order_id": int(expected_order_id)}]
+            if path == f"/orders/{expected_order_id}":
+                return {"id": int(expected_order_id)}
+            raise AssertionError(f"endpoint inesperado: {path}")
+
+        with patch.object(app, "ml_get", side_effect=fake_ml_get):
+            order, source = app.find_order_by_shipment_identifier(scanner_code)
+
+        self.assertEqual(source, "shipment")
+        self.assertEqual(str(order["id"]), expected_order_id)
+
+    def test_mediation_result_and_fee_resolution(self):
+        status, note = app.mediation_result_from_resolution(
+            "closed",
+            {"reason": "coverage_decision", "benefited": ["respondent"]},
+        )
+        self.assertEqual(status, "aprovado")
+        self.assertIn("vendedor", note.lower())
+
+        status, _ = app.mediation_result_from_resolution(
+            "closed",
+            {"reason": "partial_refunded", "benefited": ["respondent", "complainant"]},
+        )
+        self.assertEqual(status, "parcial")
+
+        status, _ = app.mediation_result_from_resolution(
+            "opened",
+            {"reason": "item_returned", "benefited": ["complainant"]},
+        )
+        self.assertEqual(status, "aguardando_plataforma")
+
+        self.assertEqual(app.resolved_return_fee({"ml_custo_envio": 18.45, "ml_tarifa_devolucao": 0}), 0.0)
+        self.assertEqual(app.resolved_return_fee({"ml_custo_envio": 0, "ml_tarifa_devolucao": 7.2}), 7.2)
+        self.assertEqual(app.resolved_return_fee({"ml_custo_envio": 0, "ml_tarifa_devolucao": 0}), 0.0)
+
     def test_classify_ml_next_claim_sets_expected_bucket(self):
         claim = {"id": "c1", "status": "opened", "reason_id": "PDD9967"}
         kind = app.classify_ml_next_claim(claim, {"status": "label_generated"})
