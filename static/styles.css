@@ -2470,6 +2470,7 @@ body.meli-page {
 }
 
 .flow-dialog {
+  position: relative;
   width: min(720px, calc(100vw - 32px));
   padding: 0;
   border: 0;
@@ -2485,6 +2486,7 @@ body.meli-page {
   position: absolute;
   top: 18px;
   right: 18px;
+  z-index: 40;
   width: 32px;
   height: 32px;
   padding: 0;
@@ -2493,6 +2495,8 @@ body.meli-page {
   color: #667085;
   font-size: 22px;
   font-weight: 400;
+  cursor: pointer;
+  pointer-events: auto;
 }
 
 .confirm-order {
@@ -2681,6 +2685,7 @@ body.meli-page {
   background: #f8fafc;
   cursor: pointer;
   transition: background-color 0.2s;
+  justify-content: space-between;
 }
 
 .checkbox-item:hover {
@@ -2688,16 +2693,45 @@ body.meli-page {
 }
 
 .checkbox-item input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-  accent-color: #1769ff;
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .checkbox-item span {
-  flex: 1;
+  flex: 1 1 auto;
   font-size: 14px;
   color: #40516b;
+  max-width: 70%;
+}
+
+.simnao-group {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.simnao-btn {
+  border: 1px solid #c7d5ea;
+  background: #ffffff;
+  color: #40516b;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.simnao-btn.active[data-choice="sim"] {
+  border-color: #22c55e;
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.simnao-btn.active[data-choice="nao"] {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
 }
 
 .etapa-content textarea {

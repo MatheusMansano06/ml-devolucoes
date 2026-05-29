@@ -628,16 +628,24 @@ def find_order_by_shipment_identifier(identifier: str) -> tuple[dict, str]:
 
 def ml_error_response(exc: Exception, pedido_id: str) -> tuple[dict, int]:
     message = str(exc)
+    pedido_digits = extract_pedido_id(pedido_id)
+    triage_like = len(pedido_digits) >= 12 and pedido_digits.startswith("1000")
     if "404" in message or "order_not_found" in message:
+        orientacao = (
+            "Confira se esse numero e o ID do pedido, pacote ou rastreio de devolucao da sua conta Mercado Livre. "
+            "Codigo do anuncio ou pedido de outra conta nao abre aqui."
+        )
+        if triage_like:
+            orientacao = (
+                "Esse parece ser um ID de triagem do FULL (1000...). "
+                "Quando ele nao mapear pela API publica, use o ID do pedido/pacote da mesma etiqueta ou o rastreio da devolucao."
+            )
         return (
             {
                 "mensagem": "Nao encontrei esse pedido/rastreio no Mercado Livre.",
                 "erro": "order_not_found",
                 "pedido_id": pedido_id,
-                "orientacao": (
-                    "Confira se esse numero e o ID do pedido, pacote ou rastreio de devolucao da sua conta Mercado Livre. "
-                    "Codigo do anuncio ou pedido de outra conta nao abre aqui."
-                ),
+                "orientacao": orientacao,
             },
             404,
         )
@@ -783,6 +791,223 @@ def ml_confirm_return_review_ok(claim_id: str | int) -> dict:
 
     detail = " | ".join(errors) if errors else "sem detalhe retornado"
     raise RuntimeError(f"Nao foi possivel concluir a devolucao no Mercado Livre: {detail}")
+
+
+def ml_send_mediation_message(claim_id: str | int, message_text: str) -> dict:
+    claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+    actions = {str(action.get("action") or "") for action in claim_available_actions(claim)}
+    errors: list[str] = []
+
+    preferred_roles: list[str | None] = []
+    if "send_message_to_mediator" in actions:
+        preferred_roles.append("mediator")
+    if "send_message_to_complainant" in actions:
+        preferred_roles.append("complainant")
+    if not preferred_roles:
+        preferred_roles = ["mediator", "complainant"]
+    preferred_roles.append(None)
+
+    payloads: list[dict] = []
+    seen_payloads: set[str] = set()
+    for role in preferred_roles:
+        payload = {"message": message_text}
+        if role:
+            payload["receiver_role"] = role
+        key = json.dumps(payload, sort_keys=True)
+        if key in seen_payloads:
+            continue
+        seen_payloads.add(key)
+        payloads.append(payload)
+
+    application_id = str(current_env().get("ML_CLIENT_ID") or "").strip()
+    endpoint_attempts = [
+        ("actions/send-message-to-mediator", f"/post-purchase/v1/claims/{claim_id}/actions/send-message-to-mediator"),
+        ("actions/send-message", f"/post-purchase/v1/claims/{claim_id}/actions/send-message"),
+        ("messages", f"/post-purchase/v1/claims/{claim_id}/messages"),
+        ("actions/message", f"/post-purchase/v1/claims/{claim_id}/actions/message"),
+    ]
+
+    for endpoint_label, endpoint_path in endpoint_attempts:
+        for payload in payloads:
+            try:
+                params = {"application_id": application_id} if (application_id and endpoint_label.startswith("actions/")) else None
+                response = ml_request(
+                    "POST",
+                    endpoint_path,
+                    params=params,
+                    body=payload,
+                )
+                return {
+                    "executed": True,
+                    "endpoint": endpoint_label,
+                    "claim_id": str(claim_id),
+                    "payload": payload,
+                    "response": response.json() if response.text else {},
+                }
+            except Exception as exc:
+                errors.append(f"{endpoint_label} ({payload}): {exc}")
+
+    detail = " | ".join(errors) if errors else "sem detalhe retornado"
+    raise RuntimeError(f"Nao foi possivel enviar mensagem de mediacao para o Mercado Livre: {detail}")
+
+
+def ml_get_return_fail_reasons(claim_id: str | int) -> list[dict]:
+    reasons = ml_get(f"/post-purchase/v1/returns/reasons?flow=seller_return_failed&claim_id={claim_id}")
+    if isinstance(reasons, list):
+        return [reason for reason in reasons if isinstance(reason, dict)]
+    return []
+
+
+def infer_return_fail_reason_from_checklist(checklist: dict | None) -> str:
+    checklist = checklist or {}
+    if checklist.get("produto_errado"):
+        return "SRF4"
+    if checklist.get("faltando_pecas") or checklist.get("faltando_acessorios"):
+        return "SRF3"
+    if any(
+        checklist.get(field)
+        for field in (
+            "embalagem_rasgada",
+            "produto_amassado",
+            "produto_riscado",
+            "produto_quebrado",
+            "produto_sujo",
+            "item_quebrado",
+        )
+    ):
+        return "SRF2"
+    return "SRF6"
+
+
+def _upload_path_from_public_file(public_path: str | None) -> Path | None:
+    raw = str(public_path or "").strip()
+    if not raw:
+        return None
+    cleaned = raw.lstrip("/").replace("/", os.sep)
+    full = (ROOT_DIR / cleaned).resolve()
+    try:
+        full.relative_to(ROOT_DIR.resolve())
+    except Exception:
+        return None
+    return full if full.exists() and full.is_file() else None
+
+
+def ml_upload_return_attachment(claim_id: str | int, upload_path: Path) -> str:
+    def send(token: str) -> requests.Response:
+        with upload_path.open("rb") as handle:
+            return requests.post(
+                f"https://api.mercadolibre.com/post-purchase/v1/claims/{claim_id}/returns/attachments",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                files={"file": (upload_path.name, handle)},
+                timeout=30,
+            )
+
+    response = send(ml_access_token())
+    if response.status_code == 401:
+        response = send(ml_access_token(force_refresh=True))
+    if not response.ok:
+        raise RuntimeError(f"Falha ao subir evidência no Mercado Livre: {response.status_code} {response.text}")
+    data = response.json() if response.text else {}
+    file_name = str(data.get("file_name") or "").strip()
+    if not file_name:
+        raise RuntimeError("Mercado Livre nao retornou file_name ao anexar evidência.")
+    return file_name
+
+
+def ml_submit_return_review_fail(
+    claim_id: str | int,
+    reason: str,
+    message_text: str,
+    order_id: str | None = None,
+    public_attachments: list[str] | None = None,
+) -> dict:
+    attachment_names: list[str] = []
+    for public_file in public_attachments or []:
+        upload_path = _upload_path_from_public_file(public_file)
+        if not upload_path:
+            continue
+        attachment_names.append(ml_upload_return_attachment(claim_id, upload_path))
+
+    payload_item: dict[str, object] = {
+        "reason": str(reason).strip(),
+        "message": message_text,
+        "attachments": attachment_names,
+    }
+    if order_id and str(order_id).isdigit():
+        payload_item["order_id"] = int(str(order_id))
+
+    response = ml_request(
+        "POST",
+        f"/post-purchase/v1/claims/{claim_id}/actions/return-review-fail",
+        body=[payload_item],
+    )
+    return {
+        "executed": True,
+        "endpoint": "actions/return-review-fail",
+        "claim_id": str(claim_id),
+        "reason": str(reason),
+        "attachments_sent": attachment_names,
+        "response": response.json() if response.text else {},
+    }
+
+
+def ml_confirm_mediation_result(claim_id: str | int, result: str) -> dict:
+    """
+    Envia o resultado da mediacao para o ML.
+    result: 'approved', 'rejected', ou 'partial'
+    """
+    valid_results = {"approved", "rejected", "partial"}
+    if result not in valid_results:
+        raise ValueError(f"Resultado invalido: {result}. Deve ser um de: {valid_results}")
+
+    try:
+        response = ml_request(
+            "POST",
+            f"/post-purchase/v1/claims/{claim_id}/resolution",
+            body={"resolution": result}
+        )
+        return {
+            "executed": True,
+            "endpoint": "confirm_resolution",
+            "claim_id": str(claim_id),
+            "result": result,
+            "response": response.json() if response.text else {},
+        }
+    except Exception as exc:
+        raise RuntimeError(f"Nao foi possivel enviar resultado da mediacao para o Mercado Livre: {str(exc)}")
+
+
+def ml_complete_return_full(claim_id: str | int) -> dict:
+    """
+    Marca uma devolucao full (fulfillment) como concluida no ML.
+    """
+    try:
+        claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+        actions = {action.get("action") for action in claim_available_actions(claim)}
+
+        if "mark_as_resolved" in actions:
+            response = ml_request("POST", f"/post-purchase/v1/claims/{claim_id}/actions/mark-as-resolved")
+            return {
+                "executed": True,
+                "endpoint": "mark-as-resolved",
+                "claim_id": str(claim_id),
+                "response": response.json() if response.text else {},
+            }
+
+        if "claim_closed" in actions:
+            response = ml_request("POST", f"/post-purchase/v1/claims/{claim_id}/actions/claim-closed")
+            return {
+                "executed": True,
+                "endpoint": "claim-closed",
+                "claim_id": str(claim_id),
+                "response": response.json() if response.text else {},
+            }
+
+        raise RuntimeError(
+            "O Mercado Livre nao disponibilizou a acao de marcar como resolvido para esta devolucao full."
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Nao foi possivel concluir devolucao full no Mercado Livre: {str(exc)}")
 
 
 def ml_return_shipments(retorno: dict | None) -> list[dict]:
@@ -1198,7 +1423,8 @@ def find_claim_by_tracking(identifier: str) -> dict:
     user_id = env_values.get("ML_USER_ID", "")
     if not user_id:
         raise RuntimeError("ML_USER_ID nao configurado.")
-    claims, _ = ml_claims_search(user_id, "opened", max_pages=10)
+    max_pages = max(1, min(env_int("ML_TRACKING_LOOKUP_MAX_PAGES", 3), 10))
+    claims, _ = ml_claims_search(user_id, "opened", max_pages=max_pages)
     for claim in claims:
         try:
             retorno = ml_get(f"/post-purchase/v2/claims/{claim.get('id')}/returns")
@@ -1219,13 +1445,141 @@ def find_claim_by_tracking(identifier: str) -> dict:
     raise RuntimeError("Mercado Livre respondeu 404: rastreio nao encontrado nas devolucoes abertas")
 
 
+def find_claim_by_aux_identifier(identifier: str) -> dict:
+    env_values = current_env()
+    user_id = env_values.get("ML_USER_ID", "")
+    if not user_id:
+        raise RuntimeError("ML_USER_ID nao configurado.")
+    identifier = extract_pedido_id(identifier)
+    started = perf_counter()
+    budget_seconds = max(4, min(env_int("ML_AUX_LOOKUP_BUDGET_SECONDS", 8), 30))
+
+    # Tentativa local no banco antes de ir para chamadas remotas.
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT ml_claim_id
+            FROM devolucoes
+            WHERE (
+                pedido_id LIKE ?
+                OR codigo_rastreio LIKE ?
+                OR ml_claim_id LIKE ?
+                OR ml_return_id LIKE ?
+                OR ml_return_reviews LIKE ?
+            )
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            [f"%{identifier}%"] * 5,
+        ).fetchone()
+    local_claim_id = str((row["ml_claim_id"] if row else "") or "").strip()
+    if local_claim_id:
+        return ml_get(f"/post-purchase/v1/claims/{local_claim_id}")
+
+    # Tentativa direta e barata usando claims/search com resource_id.
+    direct_params = (
+        ("orders", "opened"),
+        ("orders", "closed"),
+        ("returns", "opened"),
+        ("returns", "closed"),
+        ("mediations", "opened"),
+        ("mediations", "closed"),
+    )
+    for resource, status in direct_params:
+        try:
+            result = ml_get(
+                f"/post-purchase/v1/claims/search?"
+                f"resource={resource}&resource_id={identifier}&status={status}"
+                f"&player_role=respondent&player_user_id={user_id}&limit=1&offset=0"
+            )
+        except Exception:
+            continue
+        data = (result or {}).get("data") or []
+        if data:
+            return data[0]
+
+    # Fallback por cache local: varre claims ativos mais recentes.
+    scan_limit = max(3, min(env_int("ML_AUX_LOOKUP_LOCAL_SCAN", 4), 20))
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT claim_id
+            FROM ml_claim_classifications
+            WHERE active = 1
+            ORDER BY datetime(last_updated) DESC
+            LIMIT ?
+            """,
+            [scan_limit],
+        ).fetchall()
+    candidate_ids = [str((row["claim_id"] if isinstance(row, sqlite3.Row) else row[0]) or "").strip() for row in rows]
+    for claim_id in candidate_ids:
+        if perf_counter() - started > budget_seconds:
+            break
+        if not claim_id:
+            continue
+        try:
+            claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+        except Exception:
+            continue
+        if lookup_matches(identifier, claim.get("id"), claim.get("resource_id")):
+            return claim
+        try:
+            retorno = ml_get(f"/post-purchase/v2/claims/{claim_id}/returns")
+        except Exception:
+            continue
+        if lookup_matches(
+            identifier,
+            (retorno or {}).get("id"),
+            (retorno or {}).get("claim_id"),
+            (retorno or {}).get("resource_id"),
+            (retorno or {}).get("order_id"),
+        ):
+            return claim
+        for shipment in ml_return_shipments(retorno):
+            if lookup_matches(
+                identifier,
+                (shipment or {}).get("tracking_number"),
+                (shipment or {}).get("shipment_id"),
+                (shipment or {}).get("id"),
+                (shipment or {}).get("resource_id"),
+                (shipment or {}).get("pack_id"),
+            ):
+                return claim
+        return_id = str((retorno or {}).get("id") or "").strip()
+        if return_id and len(identifier) >= 10:
+            try:
+                reviews_payload = ml_get(f"/post-purchase/v1/returns/{return_id}/reviews")
+            except Exception:
+                reviews_payload = {}
+            for review in (reviews_payload or {}).get("reviews") or []:
+                if lookup_matches(identifier, review.get("id"), review.get("resource_id"), review.get("review_id")):
+                    return claim
+                for resource_review in (review or {}).get("resource_reviews") or []:
+                    if lookup_matches(
+                        identifier,
+                        resource_review.get("id"),
+                        resource_review.get("resource_id"),
+                        resource_review.get("review_id"),
+                    ):
+                        return claim
+    raise RuntimeError("Mercado Livre respondeu 404: identificador auxiliar nao encontrado em claims/returns/reviews.")
+
+
 def build_devolucao_from_identifier(identifier: str) -> dict:
     try:
         order, source = find_order_by_identifier(identifier)
     except Exception as exc:
         if "404" not in str(exc) and "order_not_found" not in str(exc):
             raise
-        claim = find_claim_by_tracking(identifier)
+        numeric_id = extract_pedido_id(identifier)
+        triage_like = len(numeric_id) >= 12 and numeric_id.startswith("1000")
+        if triage_like:
+            claim = find_claim_by_aux_identifier(identifier)
+        else:
+            try:
+                claim = find_claim_by_tracking(identifier)
+            except Exception:
+                claim = find_claim_by_aux_identifier(identifier)
         return build_ml_devolucao(claim)
     mediations = order.get("mediations") or []
     for mediation in mediations:
@@ -2591,16 +2945,25 @@ def api_listar_mediacoes():
                 d.status IN ('aguardando_plataforma', 'contestacao_aberta', 'aprovado', 'parcial', 'reprovado')
                 OR COALESCE(d.mediacao_mensagem, '') <> ''
                 OR EXISTS (SELECT 1 FROM contestacoes c WHERE c.devolucao_id = d.id)
+                OR (d.status = 'encerrado' AND d.ml_tipo_logistica = 'full_ml')
             )
             ORDER BY datetime(COALESCE(d.ultima_sincronizacao_ml, d.data_solicitacao)) DESC
             """
         ).fetchall()
-    payload = []
-    for row in rows:
-        data = dict(row)
-        status = str(data.get("status") or "").lower()
-        data["situacao_mediacao"] = "concluida" if status in MEDIATION_FINAL_STATUSES else "processando"
-        payload.append(data)
+        payload = []
+        for row in rows:
+            data = dict(row)
+            status = str(data.get("status") or "").lower()
+            fee_atual = round(abs(float(data.get("ml_tarifa_devolucao") or 0.0)), 2)
+            fee_resolvida = resolved_return_fee(data)
+            if fee_resolvida > 0 and abs(fee_resolvida - fee_atual) >= 0.01:
+                conn.execute(
+                    "UPDATE devolucoes SET ml_tarifa_devolucao = ? WHERE id = ?",
+                    [fee_resolvida, data["id"]],
+                )
+                data["ml_tarifa_devolucao"] = fee_resolvida
+            data["situacao_mediacao"] = "concluida" if status in MEDIATION_FINAL_STATUSES or status == "encerrado" else "processando"
+            payload.append(data)
     return jsonify(payload)
 
 
@@ -3114,7 +3477,16 @@ def api_chegada(item_id: int):
     return jsonify(payload)
 
 
-def gerar_mensagem_mediacao(devolucao: dict, checklist: dict | None, evidencias: list[dict]) -> str:
+def gerar_mensagem_mediacao(
+    devolucao: dict,
+    checklist: dict | None,
+    evidencias: list[dict],
+    observacoes_operador: str = "",
+) -> tuple[str, str]:
+    """
+    Gera mensagem de mediacao com sugestao automatica baseada no checklist.
+    Retorna (mensagem_completa, sugestao_resultado).
+    """
     checklist = checklist or {}
     problemas = [
         ("Embalagem rasgada/violada", "embalagem_rasgada"),
@@ -3128,42 +3500,80 @@ def gerar_mensagem_mediacao(devolucao: dict, checklist: dict | None, evidencias:
         ("Sem embalagem original", "sem_embalagem_original"),
     ]
     problemas_marcados = [label for label, field in problemas if checklist.get(field)]
+    texto_livre = " ".join(
+        [
+            str(checklist.get("observacoes") or ""),
+            str(observacoes_operador or ""),
+        ]
+    ).lower()
+    palavras_problema = (
+        "rasgad", "violad", "amassad", "riscad", "quebrad", "avariad",
+        "faltando", "falta", "incomplet", "diferente", "errado",
+        "defeit", "danific", "sujo", "sinal de uso", "uso",
+    )
+    texto_indica_problema = any(p in texto_livre for p in palavras_problema)
     linhas = [
-        "Olá, Mercado Livre.",
+        "Ola, Mercado Livre.",
         "",
-        "Recebemos a devolução e identificamos divergência na revisão do produto.",
+        "Recebemos a devolucao e identificamos divergencia na revisao do produto.",
         f"Pedido: {devolucao.get('pedido_id')}",
         f"Produto: {devolucao.get('produto_nome')}",
         f"Motivo informado pelo comprador: {devolucao.get('motivo_devolucao') or '-'}",
         f"Rastreio: {devolucao.get('codigo_rastreio') or '-'}",
         "",
         "Checklist interno:",
-        f"- Produto confere com o pedido: {'sim' if (checklist or {}).get('produto_confere') else 'não'}",
-        f"- Embalagem íntegra: {'sim' if (checklist or {}).get('embalagem_integra') else 'não'}",
-        f"- Possui sinais de uso: {'sim' if (checklist or {}).get('possui_sinais_de_uso') else 'não'}",
-        f"- Item quebrado/avariado: {'sim' if (checklist or {}).get('item_quebrado') else 'não'}",
-        f"- Faltando peças/acessórios: {'sim' if (checklist or {}).get('faltando_pecas') else 'não'}",
-        f"- Motivo informado confere: {'sim' if (checklist or {}).get('motivo_confere') else 'não'}",
+        f"- Produto confere com o pedido: {'sim' if (checklist or {}).get('produto_confere') else 'nao'}",
+        f"- Embalagem integra: {'sim' if (checklist or {}).get('embalagem_integra') else 'nao'}",
+        f"- Possui sinais de uso: {'sim' if (checklist or {}).get('possui_sinais_de_uso') else 'nao'}",
+        f"- Item quebrado/avariado: {'sim' if (checklist or {}).get('item_quebrado') else 'nao'}",
+        f"- Faltando pecas/acessorios: {'sim' if (checklist or {}).get('faltando_pecas') else 'nao'}",
+        f"- Motivo informado confere: {'sim' if (checklist or {}).get('motivo_confere') else 'nao'}",
     ]
     if problemas_marcados:
         linhas.append("")
         linhas.append("Divergencias encontradas:")
         linhas.extend([f"- {problema}" for problema in problemas_marcados])
+
     obs = checklist.get("observacoes")
     if obs:
-        linhas.extend(["", f"Observações: {obs}"])
+        linhas.extend(["", f"Observacoes: {obs}"])
+
+    extra_obs = str(observacoes_operador or "").strip()
+    if extra_obs:
+        linhas.extend(["", f"Observacoes do operador (etapa 4): {extra_obs}"])
+
     if evidencias:
         linhas.append("")
-        linhas.append("Evidências anexadas no painel interno:")
+        linhas.append("Evidencias anexadas no painel interno:")
         for ev in evidencias:
-            linhas.append(f"- {ev.get('descricao') or 'Evidência'}: {request.host_url.rstrip('/')}{ev.get('arquivo')}")
-    linhas.extend(["", "Solicitamos a mediação/revisão com base nas evidências acima."])
-    return "\n".join(linhas)
+            linhas.append(f"- {ev.get('descricao') or 'Evidencia'}: {request.host_url.rstrip('/')}{ev.get('arquivo')}")
+
+    linhas.extend(["", "Solicitamos a mediacao/revisao com base nas evidencias acima."])
+    mensagem = "\n".join(linhas)
+
+    produto_confere = checklist.get("produto_confere")
+    embalagem_integra = checklist.get("embalagem_integra")
+    motivo_confere = checklist.get("motivo_confere")
+
+    if produto_confere and embalagem_integra and motivo_confere and not problemas_marcados and not texto_indica_problema:
+        sugestao = "reprovado"
+    elif (not produto_confere or not embalagem_integra or not motivo_confere) and (problemas_marcados or texto_indica_problema):
+        sugestao = "aprovado"
+    elif texto_indica_problema and not (produto_confere and embalagem_integra and motivo_confere):
+        sugestao = "aprovado"
+    else:
+        sugestao = "parcial"
+
+    return mensagem, sugestao
 
 
-@app.post("/api/devolucoes/<int:item_id>/mediacao/mensagem")
-def api_gerar_mediacao(item_id: int):
+@app.post("/api/devolucoes/<int:item_id>/mediacao/gerar-sugestao")
+def api_gerar_sugestao_mediacao(item_id: int):
+    """Gera mensagem e sugestão sem enviar ainda para o ML."""
     require_login()
+    body = request.get_json(silent=True) or {}
+    checklist_override = body.get("checklist") if isinstance(body.get("checklist"), dict) else None
+    observacoes_operador = str(body.get("observacoes_operador") or "").strip()
     with db() as conn:
         devolucao = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
         if not devolucao:
@@ -3176,9 +3586,116 @@ def api_gerar_mediacao(item_id: int):
                 }
             ), 409
         checklist = row_to_dict(conn.execute("SELECT * FROM checklists WHERE devolucao_id = ?", [item_id]).fetchone())
+        if checklist_override:
+            checklist = {**(checklist or {}), **checklist_override}
         evidencias = [dict(row) for row in conn.execute("SELECT * FROM evidencias WHERE devolucao_id = ? ORDER BY id DESC", [item_id]).fetchall()]
-        mensagem = gerar_mensagem_mediacao(devolucao, checklist, evidencias)
+        mensagem, sugestao_resultado = gerar_mensagem_mediacao(
+            devolucao,
+            checklist,
+            evidencias,
+            observacoes_operador=observacoes_operador,
+        )
+
+    return jsonify({
+        "mensagem": "Sugestão gerada",
+        "texto": mensagem,
+        "sugestao_resultado": sugestao_resultado,
+        "pode_editar": True
+    })
+
+
+@app.get("/api/devolucoes/<int:item_id>/mediacao/fluxo")
+def api_fluxo_mediacao(item_id: int):
+    require_login()
+    with db() as conn:
+        devolucao = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
+        if not devolucao:
+            return jsonify({"mensagem": "Devolucao nao encontrada"}), 404
+        claim_id = str(devolucao.get("ml_claim_id") or "").strip()
+        if not claim_id:
+            return jsonify({"modo": "local_only", "actions": [], "reasons": [], "default_reason": "SRF6"})
+        claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+        actions = {str(action.get("action") or "") for action in claim_available_actions(claim)}
+        checklist = row_to_dict(conn.execute("SELECT * FROM checklists WHERE devolucao_id = ?", [item_id]).fetchone()) or {}
+        default_reason = infer_return_fail_reason_from_checklist(checklist)
+        if "return_review_fail" in actions and "send_message_to_mediator" not in actions:
+            return jsonify(
+                {
+                    "modo": "return_review_fail",
+                    "actions": sorted(actions),
+                    "reasons": ml_get_return_fail_reasons(claim_id),
+                    "default_reason": default_reason,
+                }
+            )
+        return jsonify({"modo": "send_message", "actions": sorted(actions), "reasons": [], "default_reason": default_reason})
+
+
+@app.post("/api/devolucoes/<int:item_id>/mediacao/mensagem")
+def api_gerar_mediacao(item_id: int):
+    require_login()
+    data = request.get_json(force=True)
+    mensagem = data.get("mensagem")
+    ml_result = None
+
+    with db() as conn:
+        devolucao = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
+        if not devolucao:
+            return jsonify({"mensagem": "Devolucao nao encontrada"}), 404
+        if ml_review_locked_item(devolucao):
+            return jsonify(
+                {
+                    "mensagem": "Devolucao ainda em revisao pelo Mercado Livre.",
+                    "orientacao": "Ainda nao e possivel abrir chamado/mediacao. Aguarde a revisao da plataforma.",
+                }
+            ), 409
+
+        evidencias = [dict(row) for row in conn.execute("SELECT * FROM evidencias WHERE devolucao_id = ? ORDER BY id DESC", [item_id]).fetchall()]
+
+        if not mensagem:
+            checklist = row_to_dict(conn.execute("SELECT * FROM checklists WHERE devolucao_id = ?", [item_id]).fetchone())
+            mensagem, _ = gerar_mensagem_mediacao(devolucao, checklist, evidencias)
+
         status_anterior = devolucao.get("status") or ""
+
+        if devolucao.get("ml_claim_id"):
+            try:
+                claim_id = str(devolucao.get("ml_claim_id") or "")
+                claim = ml_get(f"/post-purchase/v1/claims/{claim_id}")
+                actions = {str(action.get("action") or "") for action in claim_available_actions(claim)}
+                checklist = row_to_dict(conn.execute("SELECT * FROM checklists WHERE devolucao_id = ?", [item_id]).fetchone()) or {}
+                if "return_review_fail" in actions and "send_message_to_mediator" not in actions:
+                    reasons = ml_get_return_fail_reasons(claim_id)
+                    valid_reason_ids = {str(reason_item.get("id") or "").strip().upper() for reason_item in reasons}
+                    reason = str(data.get("reason") or "").strip().upper() or infer_return_fail_reason_from_checklist(checklist)
+                    if valid_reason_ids and reason not in valid_reason_ids:
+                        return jsonify(
+                            {
+                                "mensagem": "Selecione um motivo valido para seguir com a revisao da devolucao Full.",
+                                "needs_reason": True,
+                                "reasons": reasons,
+                            }
+                        ), 409
+                    if reason in {"SRF2", "SRF4"} and not evidencias:
+                        return jsonify(
+                            {
+                                "mensagem": "Para este tipo de problema, o Mercado Livre exige foto/evidencia.",
+                                "orientacao": "Anexe pelo menos uma imagem na etapa de fotos e tente novamente.",
+                                "needs_reason": True,
+                                "reasons": reasons,
+                            }
+                        ), 409
+                    ml_result = ml_submit_return_review_fail(
+                        claim_id=claim_id,
+                        reason=reason or "SRF6",
+                        message_text=mensagem,
+                        order_id=str(devolucao.get("pedido_id") or ""),
+                        public_attachments=[str(ev.get("arquivo") or "") for ev in evidencias],
+                    )
+                else:
+                    ml_result = ml_send_mediation_message(claim_id, mensagem)
+            except Exception as exc:
+                return jsonify({"mensagem": "Erro ao enviar mensagem para o Mercado Livre", "erro": str(exc)}), 400
+
         conn.execute(
             "UPDATE devolucoes SET mediacao_mensagem = ?, status = 'aguardando_plataforma', requer_acao = 0, ml_ativo = 0, observacao_final = ? WHERE id = ?",
             [mensagem, "Mediacao em processamento no Mercado Livre.", item_id],
@@ -3199,12 +3716,15 @@ def api_gerar_mediacao(item_id: int):
                 "mediacao_mercado_livre",
                 "Mediação gerada automaticamente com checklist e evidências.",
                 float(devolucao.get("valor_produto") or 0),
-                json.dumps([ev["id"] for ev in evidencias]),
+                json.dumps([ev.get("id") for ev in evidencias if ev.get("id")]),
                 mensagem,
                 now_iso(),
             ],
         )
-    return jsonify({"mensagem": "Mensagem de mediacao gerada", "texto": mensagem})
+    payload = {"mensagem": "Mensagem de mediacao enviada para o Mercado Livre"}
+    if ml_result:
+        payload["mercado_livre"] = ml_result
+    return jsonify(payload)
 
 
 @app.get("/api/devolucoes/<int:item_id>/historico")
@@ -3276,7 +3796,7 @@ def api_historico_incompletos():
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT id, pedido_id, produto_nome, etapa_checklist_atual,
+            SELECT id, pedido_id, produto_nome, etapa_checklist_atual, conteudo_progresso_checklist,
                    ROUND((etapa_checklist_atual / 3.0) * 100) as percentual_conclusao,
                    data_solicitacao
             FROM devolucoes
@@ -3285,6 +3805,28 @@ def api_historico_incompletos():
             """
         ).fetchall()
     return jsonify([row_to_dict(row) for row in rows])
+
+
+@app.get("/api/devolucoes/<int:item_id>/progresso-checklist")
+def api_get_progresso_checklist(item_id: int):
+    require_login()
+    with db() as conn:
+        item = conn.execute(
+            """
+            SELECT id, etapa_checklist_atual, conteudo_progresso_checklist
+            FROM devolucoes
+            WHERE id = ? AND etapa_checklist_atual > 0
+            """,
+            [item_id]
+        ).fetchone()
+    if not item:
+        return jsonify({"mensagem": "Devolucao nao encontrada ou sem progresso salvo"}), 404
+    result = dict(item)
+    try:
+        result["conteudo"] = json.loads(item["conteudo_progresso_checklist"] or "{}")
+    except:
+        result["conteudo"] = {}
+    return jsonify(result)
 
 
 @app.get("/api/devolucoes/<int:item_id>/evidencias")
@@ -3393,9 +3935,19 @@ def api_resultado_contestacao(item_id: int, contestacao_id: int):
     resultado = data.get("resultado")
     if resultado not in {"aprovado", "parcial", "reprovado"}:
         return jsonify({"mensagem": "Resultado invalido"}), 400
+
+    ml_result = None
     with db() as conn:
         atual = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
         tarifa = resolved_return_fee(atual or {})
+
+        if atual and atual.get("ml_claim_id"):
+            ml_result_map = {"aprovado": "approved", "parcial": "partial", "reprovado": "rejected"}
+            try:
+                ml_result = ml_confirm_mediation_result(atual["ml_claim_id"], ml_result_map[resultado])
+            except Exception as exc:
+                return jsonify({"mensagem": "Erro ao enviar resultado para o Mercado Livre", "erro": str(exc)}), 400
+
         conn.execute("UPDATE contestacoes SET status = ?, data_resultado = ? WHERE id = ?", [resultado, now_iso(), contestacao_id])
         conn.execute(
             "UPDATE devolucoes SET status = ?, valor_recuperado = ?, valor_perdido = ?, observacao_final = ?, requer_acao = 0, ml_ativo = 0, ml_tarifa_devolucao = ? WHERE id = ?",
@@ -3408,7 +3960,55 @@ def api_resultado_contestacao(item_id: int, contestacao_id: int):
                 item_id,
             ],
         )
-    return jsonify({"mensagem": "Resultado salvo"})
+    payload = {"mensagem": "Resultado salvo e enviado para o Mercado Livre"}
+    if ml_result:
+        payload["mercado_livre"] = ml_result
+    return jsonify(payload)
+
+
+@app.post("/api/devolucoes/<int:item_id>/completo-full")
+def api_marcar_completo_full(item_id: int):
+    """Marca uma devolucao full como completa no ML e localmente."""
+    require_login()
+    ml_result = None
+    with db() as conn:
+        devolucao = row_to_dict(conn.execute("SELECT * FROM devolucoes WHERE id = ?", [item_id]).fetchone())
+        if not devolucao:
+            return jsonify({"mensagem": "Devolucao nao encontrada"}), 404
+
+        if devolucao.get("ml_tipo_logistica") != "full_ml":
+            return jsonify({"mensagem": "Esta devolucao nao e do tipo full"}), 400
+
+        if devolucao.get("ml_claim_id"):
+            try:
+                ml_result = ml_complete_return_full(devolucao["ml_claim_id"])
+            except Exception as exc:
+                return jsonify({"mensagem": "Erro ao completar no Mercado Livre", "erro": str(exc)}), 400
+
+        tarifa = resolved_return_fee(devolucao or {})
+        status_anterior = devolucao.get("status") or ""
+        observacao = (
+            f"Devolucao completa e encerrada. Tarifa de devolucao identificada: R$ {tarifa:.2f}."
+            if tarifa > 0
+            else "Devolucao completa e encerrada. Sem tarifa de devolucao identificada."
+        )
+        conn.execute(
+            "UPDATE devolucoes SET status = 'encerrado', requer_acao = 0, ml_ativo = 0, ml_tarifa_devolucao = ?, observacao_final = ? WHERE id = ?",
+            [tarifa, observacao, item_id],
+        )
+        conn.execute(
+            "INSERT INTO historico_status (devolucao_id, status_anterior, status_novo, data_alteracao) VALUES (?, ?, ?, ?)",
+            [item_id, status_anterior, "encerrado", now_iso()],
+        )
+
+    payload = {
+        "mensagem": "Devolucao full marcada como concluida",
+        "tarifa_devolucao": tarifa,
+        "houve_desconto_tarifa": bool(tarifa > 0),
+    }
+    if ml_result:
+        payload["mercado_livre"] = ml_result
+    return jsonify(payload)
 
 
 if __name__ == "__main__":

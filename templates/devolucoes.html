@@ -90,17 +90,7 @@
               </div>
               <strong id="totalResumoML" class="sr-total">0</strong>
               <div class="summary-header-actions">
-                <div class="summary-shortcuts">
-                  <button type="button" class="shortcut-chip" id="shortcutChamados" data-shortcut="mediacoes">
-                    Chamados <b id="disputasAbertasMini">0</b>
-                  </button>
-                  <button type="button" class="shortcut-chip" id="shortcutReembolsos" data-shortcut="aguardando-plataforma">
-                    Reembolso <b id="reembolsosPendentesMini">0</b>
-                  </button>
-                  <button type="button" class="shortcut-chip" id="shortcutRisco" data-shortcut="outros-problemas">
-                    Reputação <b id="riscosReputacaoMini">0</b>
-                  </button>
-                </div>
+                <button type="button" class="summary-link" id="abrirMediacoesResumo">Acompanhar mediações</button>
                 <button type="button" class="summary-link" data-floating-panel="painelTodasDevolucoes">Ver todas</button>
               </div>
             </div>
@@ -261,7 +251,7 @@
   </dialog>
 
   <dialog id="modalChecklistEtapas" class="flow-dialog checklist-etapas-dialog">
-    <button type="button" class="dialog-close" aria-label="Fechar" data-close-checklist>x</button>
+    <button type="button" class="dialog-close" aria-label="Fechar" data-close-checklist onclick="this.closest('dialog') && this.closest('dialog').close()">x</button>
     <div class="checklist-etapas-container">
       <!-- Etapa 1: Inspeção do Produto -->
       <div class="etapa active" data-etapa="1">
@@ -362,7 +352,49 @@
         <div class="etapa-actions">
           <button type="button" class="btn-pausar">Pausar</button>
           <button type="button" class="btn-voltar" data-voltar="2">Voltar</button>
-          <button type="button" class="btn-finalizar" data-finalizar>Finalizar e Salvar</button>
+          <button type="button" class="btn-proximo" data-proximo="4">Próximo - Gerar Mensagem</button>
+        </div>
+      </div>
+
+      <!-- Etapa 4: Gerar Mensagem com IA -->
+      <div class="etapa" data-etapa="4">
+        <div class="etapa-header">
+          <h2>Etapa 4: Gerar Mensagem com IA</h2>
+          <p>Revise o checklist e gere a mensagem de mediação</p>
+        </div>
+        <div class="etapa-content">
+          <div id="resumoChecklistEtapa4" style="background: #f3f4f6; padding: 12px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; max-height: 200px; overflow-y: auto;">
+            <b>Resumo do seu checklist:</b><br>
+            <span id="resumoChecklistTexto">Carregando...</span>
+          </div>
+          <button type="button" id="gerarMensagemEtapa4" class="primary-wide" style="width: 100%; margin-bottom: 12px;">Gerar Sugestão com IA 🤖</button>
+
+          <div id="sugestaoEtapa4" style="display: none; margin: 16px 0; padding: 12px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 6px;">
+            <b style="color: #15803d;">💡 Sugestão de Resultado:</b>
+            <p id="sugestaoTextoEtapa4" style="margin: 8px 0; font-weight: 500;"></p>
+            <p id="sugestaoDescEtapa4" style="margin: 8px 0; font-size: 12px; color: #666;"></p>
+          </div>
+
+          <div id="fullReasonBlock" style="display:none; margin: 16px 0; padding: 12px; border: 1px solid #dbe4ef; border-radius: 8px; background: #f8fafc;">
+            <label for="fullReasonSelect" style="display:block; margin-bottom: 8px; font-weight: 700; color: #334155;">
+              Selecione o problema para revisão Full no Mercado Livre
+            </label>
+            <select id="fullReasonSelect" style="width:100%; min-height: 40px;">
+              <option value="">Selecione o motivo</option>
+            </select>
+            <small id="fullReasonHint" style="display:block; margin-top: 8px; color: #64748b;">
+              Este caso exige motivo obrigatório antes do envio para o Mercado Livre.
+            </small>
+          </div>
+
+          <textarea id="mensagemEtapa4" placeholder="Sua mensagem para o Mercado Livre aparecerá aqui após gerar..." style="width: 100%; min-height: 150px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
+
+          <p style="margin-top: 12px; font-size: 12px; color: #666;">Você pode editar a mensagem antes de enviar para o Mercado Livre.</p>
+        </div>
+        <div class="etapa-actions">
+          <button type="button" class="btn-pausar">Pausar (Salvar Progresso)</button>
+          <button type="button" class="btn-voltar" data-voltar="3">Voltar</button>
+          <button type="button" class="btn-finalizar-etapa4" data-finalizar="4">Finalizar e Enviar para ML</button>
         </div>
       </div>
 
@@ -373,6 +405,8 @@
         <span class="progress-dot" data-etapa="2">2</span>
         <span class="progress-line"></span>
         <span class="progress-dot" data-etapa="3">3</span>
+        <span class="progress-line"></span>
+        <span class="progress-dot" data-etapa="4">4</span>
       </div>
     </div>
   </dialog>
@@ -389,6 +423,7 @@
     let ultimoTotalDevolucoes = 0;
     let resumoMlAtual = null;
     let mediacoesAcompanhamento = [];
+    let fluxoMediacaoAtual = { modo: "send_message", reasons: [], default_reason: "" };
 
     const money = (value) => Number(value || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
     const moneySigned = (value) => {
@@ -522,7 +557,12 @@
     const parseJsonSafe = (value, fallback = []) => {
       try { return JSON.parse(value || "[]"); } catch { return fallback; }
     };
-    const isFullReviewedReturn = (item = {}) => isFullPendingReviewCase(item);
+    const isFullReviewedReturn = (item = {}) => {
+      // Mostrar botão "Marcar como concluído" para qualquer devolução FULL que não esteja em um estado final
+      const isFull = String(item.ml_tipo_logistica || "").toLowerCase() === "full_ml";
+      const isNotFinal = !["encerrado", "cancelado"].includes(String(item.status || "").toLowerCase());
+      return isFull && isNotFinal;
+    };
     const recebimentoDetalhado = (item = {}) => {
       const precoProduto = round2(Number(item.ml_valor_pago || item.valor_produto || 0));
       const tarifaVenda = round2(-Math.abs(Number(item.ml_taxa_venda || 0)));
@@ -618,7 +658,11 @@
         if (timer) clearTimeout(timer);
       }
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error([data.mensagem || data.erro || "Erro na requisicao", data.orientacao].filter(Boolean).join(" "));
+      if (!response.ok) {
+        const err = new Error([data.mensagem || data.erro || "Erro na requisicao", data.orientacao].filter(Boolean).join(" "));
+        err.payload = data;
+        throw err;
+      }
       return data;
     };
 
@@ -654,7 +698,7 @@
         if (status) params.set("status", status);
         if (prioridade) params.set("prioridade", prioridade);
 
-        const [lista, mediacoes] = await Promise.all([
+        const [lista, _resumo, mediacoes] = await Promise.all([
           api(`/api/devolucoes?${params.toString()}`),
           carregarResumoML(),
           api("/api/devolucoes/mediacoes").catch(() => []),
@@ -781,8 +825,8 @@
       setText("orgTotal", retirar);
       setText("fullTotal", outros);
       setText("mediacaoTotal", mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "processando").length);
-      const mediaConcluidas = mediacoesAcompanhamento.filter((item) => item.situacao_mediacao === "concluida");
-      const totalTarifas = mediaConcluidas.reduce((sum, item) => sum + (Number(item.ml_tarifa_devolucao || 0)), 0);
+      const itensComTarifa = mediacoesAcompanhamento.filter((item) => Number(item.ml_tarifa_devolucao || 0) > 0);
+      const totalTarifas = itensComTarifa.reduce((sum, item) => sum + (Number(item.ml_tarifa_devolucao || 0)), 0);
       const tarifasFormatado = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalTarifas);
       setText("totalTarifas", tarifasFormatado);
       atualizarPainelDisputas();
@@ -877,6 +921,7 @@
               <a href="${mlUrl}" target="_blank" rel="noopener" class="secondary-button">Ver fotos e evidencias</a>
               <a href="${mlUrl}" target="_blank" rel="noopener" class="secondary-button">Solicitar retirada</a>
               <button type="button" id="fullRetireiComProblemaConfirmacao">Retirei o produto e estou com problema</button>
+              <button type="button" id="fullConcluirConfirmacao" class="primary-wide" style="background: #10b981;">Tudo certo - Concluir devolucao</button>
             ` : `<button type="button" id="confirmarPedidoCorreto">Esse e o pedido</button>`}
             <button type="button" class="secondary-button" data-close-confirmacao>Cancelar</button>
           </div>
@@ -901,6 +946,27 @@
             abrirChecklistEtapas(item.id);
           } catch (error) {
             showImportFeedback("Nao foi possivel abrir o fluxo de mediacao.", "error", error.message);
+          }
+        });
+      }
+      const fullConcluirBtn = document.getElementById("fullConcluirConfirmacao");
+      if (fullConcluirBtn) {
+        fullConcluirBtn.addEventListener("click", async () => {
+          if (!confirm("Concluir essa devolucao Full agora?")) return;
+          try {
+            fullConcluirBtn.disabled = true;
+            const result = await api(`/api/devolucoes/${item.id}/completo-full`, { method: "POST", body: "{}" });
+            document.getElementById("modalPedidoConfirmacao").close();
+            await carregarTudo();
+            const detalheTarifa = result?.houve_desconto_tarifa
+              ? `Tarifa de devolucao identificada: ${money(result.tarifa_devolucao || 0)}.`
+              : "Sem desconto de tarifa nesta devolucao.";
+            showImportFeedback("Devolucao concluida com sucesso.", "success", detalheTarifa);
+            document.getElementById("metricaTarifas")?.click();
+          } catch (error) {
+            showImportFeedback("Nao foi possivel concluir a devolucao.", "error", error.message);
+          } finally {
+            fullConcluirBtn.disabled = false;
           }
         });
       }
@@ -1189,6 +1255,9 @@
                 <button type="button" id="fullRetireiComProblema" class="danger-action">Retirei o produto e estou com problema</button>
               </div>
             </section>
+            <section class="full-complete-action" style="margin-top: 16px;">
+              <button type="button" id="marcarCompletoFull" class="primary-wide" style="background: #10b981;">✓ Tudo pronto - Marcar como concluido</button>
+            </section>
           ` : `
             <section class="arrival-question">
               <div>
@@ -1277,8 +1346,24 @@
               <b>Resumo para IA (pre-visualizacao)</b>
               <textarea id="mediacaoResumoIA" readonly placeholder="O resumo do operador aparece aqui automaticamente."></textarea>
             </div>
-            <button type="button" id="gerarMediacao" class="primary-wide">Gerar mensagem final da mediacao</button>
-            <textarea id="mensagemMediacao" readonly placeholder="A mensagem automatica final aparecera aqui depois da geracao.">${item.mediacao_mensagem || ""}</textarea>
+            <button type="button" id="gerarMediacao" class="primary-wide">Gerar sugestão com IA</button>
+
+            <div id="sugestaoResultado" style="display:none; margin-top: 16px; padding: 16px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px;">
+              <h4 style="margin-top: 0; color: #15803d;">💡 Sugestão IA: Resultado de Mediação</h4>
+              <p id="sugestaoResultadoTexto" style="margin: 8px 0; font-weight: 500;"></p>
+              <p id="sugestaoResultadoDescricao" style="margin: 8px 0; font-size: 13px; color: #666;"></p>
+              <div style="display: flex; gap: 8px; margin-top: 12px;">
+                <button type="button" id="confirmarSugestao" class="primary-small" style="padding: 8px 16px; font-size: 13px; flex: 1;">Confirmar e Gerar Mensagem</button>
+                <button type="button" id="editarMensagem" class="secondary-button" style="padding: 8px 16px; font-size: 13px; flex: 1;">Editar Antes</button>
+              </div>
+            </div>
+
+            <textarea id="mensagemMediacao" placeholder="A mensagem automatica final aparecera aqui depois da confirmacao." style="margin-top: 12px;">${item.mediacao_mensagem || ""}</textarea>
+
+            <div id="acoesAposGeracao" style="display: none; margin-top: 12px; padding: 12px; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px;">
+              <p style="margin: 0 0 12px 0; font-size: 13px;"><b>✓ Mensagem gerada!</b> Revise e envie para o Mercado Livre quando pronto.</p>
+              <button type="button" id="enviarMediacao" class="primary-wide" style="width: 100%;">Enviar mensagem para ML</button>
+            </div>
             <div class="history-list">
               ${contestacoes.map((cont) => `<p><strong>${label(cont.status)}</strong> ${cont.tipo_divergencia} - ${money(cont.valor_contestado)}</p>`).join("") || "<p>Nenhuma contestacao.</p>"}
             </div>
@@ -1419,12 +1504,125 @@
         await carregarTudo();
       });
 
+      // Botão "Gerar sugestão"
       gerarMediacaoBtn.addEventListener("click", async () => {
-        const result = await api(`/api/devolucoes/${selecionada.id}/mediacao/mensagem`, { method: "POST", body: "{}" });
-        document.getElementById("mensagemMediacao").value = result.texto;
-        await navigator.clipboard?.writeText(result.texto).catch(() => {});
-        await carregarTudo();
+        try {
+          gerarMediacaoBtn.disabled = true;
+          const checklistAtual = {};
+          [
+            "produto_confere",
+            "embalagem_integra",
+            "possui_sinais_de_uso",
+            "item_quebrado",
+            "faltando_pecas",
+            "motivo_confere",
+            "embalagem_rasgada",
+            "produto_amassado",
+            "produto_riscado",
+            "produto_quebrado",
+            "produto_sujo",
+            "faltando_acessorios",
+            "produto_errado",
+            "sem_embalagem_original",
+          ].forEach((field) => {
+            checklistAtual[field] = checklistForm.querySelector(`input[name='${field}']`)?.checked || false;
+          });
+          checklistAtual.observacoes = checklistForm.querySelector("textarea[name='observacoes']")?.value || "";
+          const result = await api(`/api/devolucoes/${selecionada.id}/mediacao/gerar-sugestao`, {
+            method: "POST",
+            body: JSON.stringify({
+              checklist: checklistAtual,
+              observacoes_operador: checklistAtual.observacoes || "",
+            }),
+          });
+
+          document.getElementById("sugestaoResultado").style.display = "block";
+          document.getElementById("sugestaoResultadoTexto").textContent = `Resultado sugerido: ${result.sugestao_resultado.toUpperCase()}`;
+
+          const descricoes = {
+            "aprovado": "Divergências confirmadas - aceitar o reembolso",
+            "reprovado": "Produto confere, embalagem íntegra - rejeitar reembolso",
+            "parcial": "Situação mista - considerar reembolso parcial"
+          };
+          document.getElementById("sugestaoResultadoDescricao").textContent = descricoes[result.sugestao_resultado] || "";
+
+          document.getElementById("mensagemMediacao").dataset.sugestaoResultado = result.sugestao_resultado;
+          document.getElementById("mensagemMediacao").value = result.texto;
+        } catch (error) {
+          showImportFeedback("Erro ao gerar sugestão", "error", error.message);
+        } finally {
+          gerarMediacaoBtn.disabled = false;
+        }
       });
+
+      // Botão "Concluído" para full
+      const marcarCompletoFullBtn = document.getElementById("marcarCompletoFull");
+      if (marcarCompletoFullBtn) {
+        marcarCompletoFullBtn.addEventListener("click", async () => {
+          if (!confirm("Tem certeza que tudo está pronto? Isto marcará a devolução como concluída no Mercado Livre.")) return;
+          try {
+            marcarCompletoFullBtn.disabled = true;
+            const result = await api(`/api/devolucoes/${selecionada.id}/completo-full`, { method: "POST", body: "{}" });
+            await carregarTudo();
+            const detalheTarifa = result?.houve_desconto_tarifa
+              ? `Tarifa de devolucao identificada: ${money(result.tarifa_devolucao || 0)}.`
+              : "Sem desconto de tarifa nesta devolucao.";
+            showImportFeedback("Devolucao Full concluida!", "success", detalheTarifa);
+            document.getElementById("metricaTarifas")?.click();
+          } catch (error) {
+            showImportFeedback("Erro ao marcar como concluído", "error", error.message);
+          } finally {
+            marcarCompletoFullBtn.disabled = false;
+          }
+        });
+      }
+
+      // Botão "Confirmar" sugestão
+      const confirmarSugestaoBtn = document.getElementById("confirmarSugestao");
+      if (confirmarSugestaoBtn) {
+        confirmarSugestaoBtn.addEventListener("click", async () => {
+          document.getElementById("sugestaoResultado").style.display = "none";
+          document.getElementById("acoesAposGeracao").style.display = "block";
+          showImportFeedback("Sugestão confirmada!", "success", "Revise a mensagem e envie para o ML.");
+        });
+      }
+
+      // Botão "Editar" mensagem
+      const editarMensagemBtn = document.getElementById("editarMensagem");
+      if (editarMensagemBtn) {
+        editarMensagemBtn.addEventListener("click", () => {
+          document.getElementById("sugestaoResultado").style.display = "none";
+          document.getElementById("mensagemMediacao").style.border = "2px solid #fbbf24";
+          document.getElementById("mensagemMediacao").focus();
+          document.getElementById("acoesAposGeracao").style.display = "block";
+          showImportFeedback("Edite a mensagem como desejar", "info", "Você pode fazer alterações antes de enviar.");
+        });
+      }
+
+      // Botão "Enviar" para ML
+      const enviarMediacaoBtn = document.getElementById("enviarMediacao");
+      if (enviarMediacaoBtn) {
+        enviarMediacaoBtn.addEventListener("click", async () => {
+          const mensagem = document.getElementById("mensagemMediacao").value;
+          if (!mensagem.trim()) {
+            showImportFeedback("Erro", "error", "Gere uma mensagem primeiro.");
+            return;
+          }
+          try {
+            enviarMediacaoBtn.disabled = true;
+            await api(`/api/devolucoes/${selecionada.id}/mediacao/mensagem`, {
+              method: "POST",
+              body: JSON.stringify({ mensagem })
+            });
+            showImportFeedback("Mensagem enviada!", "success", "A mediação foi enviada para o Mercado Livre.");
+            await carregarTudo();
+          } catch (error) {
+            showImportFeedback("Erro ao enviar", "error", error.message);
+          } finally {
+            enviarMediacaoBtn.disabled = false;
+          }
+        });
+      }
     }
 
     document.getElementById("sincronizarMl").addEventListener("click", async () => {
@@ -1436,8 +1634,12 @@
       const closeButton = event.target.closest(".dialog-close");
       if (!closeButton) return;
       const dialog = closeButton.closest("dialog");
-      if (dialog?.open) dialog.close();
-    });
+      if (dialog?.open) {
+        dialog.close();
+        event.stopPropagation();
+        return false;
+      }
+    }, true); // Usar captura para garantir que executa primeiro
 
     function bucketCardHTML(card) {
       const imagem = card.produto_imagem || productImage({});
@@ -1845,6 +2047,139 @@
       showImportFeedback("Foto(s) anexada(s).", "success", "Evidencias atualizadas com sucesso.");
     }
 
+    function obterRespostaSimNao(name) {
+      const input = document.querySelector(`#modalChecklistEtapas .etapa[data-etapa='1'] input[name='${name}']`);
+      if (!input) return { explicit: false, valor: false };
+      const explicit = input.dataset.explicit === "1";
+      return { explicit, valor: Boolean(input.checked) };
+    }
+
+    function validarChecklistEtapa1() {
+      const inputs = Array.from(document.querySelectorAll("#modalChecklistEtapas .etapa[data-etapa='1'] input[type='checkbox']"));
+      const pendentes = inputs.filter((input) => input.dataset.explicit !== "1");
+      if (pendentes.length) {
+        showImportFeedback(
+          "Checklist incompleto",
+          "error",
+          `Responda Sim/Não em ${pendentes.length} item(ns) antes de avançar.`
+        );
+        return false;
+      }
+      return true;
+    }
+
+    function coletarChecklistPayloadEtapas() {
+      const produtoConfere = obterRespostaSimNao("produto_confere");
+      const embalagemRasgada = obterRespostaSimNao("embalagem_rasgada");
+      const produtoSujo = obterRespostaSimNao("produto_sujo");
+      const produtoQuebrado = obterRespostaSimNao("produto_quebrado");
+      const faltandoPecas = obterRespostaSimNao("faltando_pecas");
+      const motivoConfere = obterRespostaSimNao("motivo_confere");
+      return {
+        produto_confere: produtoConfere.valor,
+        embalagem_integra: !embalagemRasgada.valor,
+        possui_sinais_de_uso: produtoSujo.valor,
+        item_quebrado: produtoQuebrado.valor,
+        faltando_pecas: faltandoPecas.valor,
+        motivo_confere: motivoConfere.valor,
+        embalagem_rasgada: embalagemRasgada.valor,
+        produto_amassado: obterRespostaSimNao("produto_amassado").valor,
+        produto_riscado: obterRespostaSimNao("produto_riscado").valor,
+        produto_quebrado: produtoQuebrado.valor,
+        produto_sujo: produtoSujo.valor,
+        faltando_acessorios: obterRespostaSimNao("faltando_acessorios").valor,
+        produto_errado: obterRespostaSimNao("produto_errado").valor,
+        sem_embalagem_original: obterRespostaSimNao("sem_embalagem_original").valor,
+        observacoes: document.querySelector("textarea[name='observacoes_checklist']")?.value || "",
+      };
+    }
+
+    function atualizarBlocoMotivoFull(fluxo = {}) {
+      const block = document.getElementById("fullReasonBlock");
+      const select = document.getElementById("fullReasonSelect");
+      const hint = document.getElementById("fullReasonHint");
+      if (!block || !select || !hint) return;
+
+      const isFullFlow = fluxo?.modo === "return_review_fail";
+      block.style.display = isFullFlow ? "block" : "none";
+      if (!isFullFlow) {
+        select.innerHTML = `<option value="">Selecione o motivo</option>`;
+        hint.textContent = "";
+        return;
+      }
+
+      const reasons = Array.isArray(fluxo?.reasons) ? fluxo.reasons : [];
+      const defaultReason = String(fluxo?.default_reason || "");
+      const options = [`<option value="">Selecione o motivo</option>`];
+      reasons.forEach((reason) => {
+        const id = String(reason?.id || "");
+        const detail = String(reason?.detail || reason?.name || id);
+        options.push(`<option value="${id}">${id} - ${detail}</option>`);
+      });
+      select.innerHTML = options.join("");
+      if (defaultReason && select.querySelector(`option[value="${defaultReason}"]`)) {
+        select.value = defaultReason;
+      }
+      hint.textContent = "No fluxo Full, o Mercado Livre exige esse motivo para concluir a revisão com problema.";
+    }
+
+    async function carregarFluxoMediacao(itemId) {
+      if (!itemId) return;
+      try {
+        const fluxo = await api(`/api/devolucoes/${itemId}/mediacao/fluxo`);
+        fluxoMediacaoAtual = fluxo || { modo: "send_message", reasons: [], default_reason: "" };
+        atualizarBlocoMotivoFull(fluxoMediacaoAtual);
+      } catch (error) {
+        fluxoMediacaoAtual = { modo: "send_message", reasons: [], default_reason: "" };
+        atualizarBlocoMotivoFull(fluxoMediacaoAtual);
+      }
+    }
+
+    function montarChecklistSimNao() {
+      const itens = document.querySelectorAll("#modalChecklistEtapas .etapa[data-etapa='1'] .checkbox-item");
+      itens.forEach((item) => {
+        const checkbox = item.querySelector("input[type='checkbox']");
+        if (!checkbox) return;
+        if (!item.querySelector(".simnao-group")) {
+          const grupo = document.createElement("div");
+          grupo.className = "simnao-group";
+          const btnSim = document.createElement("button");
+          btnSim.type = "button";
+          btnSim.className = "simnao-btn";
+          btnSim.dataset.choice = "sim";
+          btnSim.textContent = "Sim";
+          const btnNao = document.createElement("button");
+          btnNao.type = "button";
+          btnNao.className = "simnao-btn";
+          btnNao.dataset.choice = "nao";
+          btnNao.textContent = "Nao";
+          grupo.appendChild(btnSim);
+          grupo.appendChild(btnNao);
+          item.appendChild(grupo);
+          btnSim.addEventListener("click", () => {
+            checkbox.checked = true;
+            checkbox.dataset.explicit = "1";
+            checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+          btnNao.addEventListener("click", () => {
+            checkbox.checked = false;
+            checkbox.dataset.explicit = "1";
+            checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+          checkbox.addEventListener("change", () => {
+            const explicit = checkbox.dataset.explicit === "1";
+            btnSim.classList.toggle("active", checkbox.checked);
+            btnNao.classList.toggle("active", explicit && !checkbox.checked);
+          });
+        }
+        const sim = item.querySelector(".simnao-btn[data-choice='sim']");
+        const nao = item.querySelector(".simnao-btn[data-choice='nao']");
+        const explicit = checkbox.dataset.explicit === "1";
+        sim?.classList.toggle("active", checkbox.checked);
+        nao?.classList.toggle("active", explicit && !checkbox.checked);
+      });
+    }
+
     function abrirChecklistEtapas(itemId) {
       etapaAtual = 1;
       const itemReal = devolucoes.find((item) => Number(item.id) === Number(itemId)) || itemEmConferencia || selecionada || { id: itemId };
@@ -1862,15 +2197,18 @@
       }
       document.querySelectorAll("#modalChecklistEtapas .etapa[data-etapa='1'] input[type='checkbox']").forEach((input) => {
         input.checked = false;
+        input.dataset.explicit = "";
       });
       const observacoesField = document.querySelector("textarea[name='observacoes_checklist']");
       if (observacoesField) observacoesField.value = "";
       const fileInput = document.getElementById("inputFotosChecklist");
       if (fileInput) fileInput.value = "";
       stopChecklistCamera();
+      montarChecklistSimNao();
       mostrarEtapa(1);
       document.getElementById("modalChecklistEtapas").showModal();
       if (itemReal?.id) {
+        carregarFluxoMediacao(itemReal.id).catch(() => {});
         carregarEvidenciasChecklistModal(itemReal.id).catch(() => {});
       }
     }
@@ -1886,10 +2224,69 @@
       etapaAtual = numero;
     }
 
+    async function gerarSugestaoEtapa4() {
+      if (!selecionada?.id) return;
+      const checklistPayload = coletarChecklistPayloadEtapas();
+      const response = await api(`/api/devolucoes/${selecionada.id}/mediacao/gerar-sugestao`, {
+        method: "POST",
+        body: JSON.stringify({
+          checklist: checklistPayload,
+          observacoes_operador: checklistPayload.observacoes || "",
+        }),
+      });
+
+      const checks = checklistPayload;
+      let resumo = "";
+      if (checks.produto_confere) resumo += "✓ Produto confere com descrição\n";
+      if (checks.motivo_confere) resumo += "✓ Motivo confere\n";
+      if (!checks.embalagem_rasgada && !checks.produto_amassado && !checks.produto_riscado && !checks.produto_quebrado && !checks.produto_sujo && !checks.faltando_pecas) {
+        resumo += "✓ Embalagem e produto íntegros\n";
+      } else {
+        if (checks.embalagem_rasgada) resumo += "⚠️ Embalagem rasgada ou violada\n";
+        if (checks.produto_amassado) resumo += "⚠️ Produto amassado\n";
+        if (checks.produto_riscado) resumo += "⚠️ Produto riscado\n";
+        if (checks.produto_quebrado) resumo += "⚠️ Produto quebrado ou avariado\n";
+        if (checks.produto_sujo) resumo += "⚠️ Sinais de uso\n";
+        if (checks.faltando_pecas) resumo += "⚠️ Peças faltando\n";
+      }
+
+      const obs = checklistPayload.observacoes;
+      if (obs?.trim()) resumo += "\n📝 Observações:\n" + obs;
+      if (!resumo.trim()) resumo = "Nenhum problema encontrado";
+      document.getElementById("resumoChecklistTexto").innerText = resumo || "(sem dados)";
+
+      const resultadoMap = {
+        "aprovado": "✅ APROVADO (Devolução aceita)",
+        "reprovado": "❌ REPROVADO (Devolvido como esperado)",
+        "parcial": "⚠️ PARCIAL (Situação mista)"
+      };
+      const resultado = response.sugestao_resultado || "reprovado";
+      document.getElementById("sugestaoTextoEtapa4").innerText = resultadoMap[resultado] || resultado;
+      document.getElementById("sugestaoDescEtapa4").innerText =
+        resultado === "aprovado" ? "Há divergências que justificam a devolução" :
+        resultado === "reprovado" ? "Produto chegou em condições esperadas" :
+        "Situação com elementos de ambos os casos";
+      document.getElementById("sugestaoEtapa4").style.display = "block";
+      document.getElementById("mensagemEtapa4").value = response.texto || "";
+    }
+
     // Botões de navegação entre etapas
     document.querySelectorAll(".btn-proximo").forEach(btn => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const proximaEtapa = Number(btn.dataset.proximo);
+        if (etapaAtual === 1 && proximaEtapa > 1) {
+          if (!validarChecklistEtapa1()) return;
+        }
+
+        // Se for ir para etapa 4, gerar sugestão automaticamente
+        if (proximaEtapa === 4 && selecionada?.id) {
+          try {
+            await gerarSugestaoEtapa4();
+          } catch (error) {
+            showImportFeedback("Erro ao gerar sugestão", "error", error.message);
+          }
+        }
+
         mostrarEtapa(proximaEtapa);
       });
     });
@@ -1901,39 +2298,65 @@
       });
     });
 
-    // Botão finalizar checklist
-    document.querySelector(".btn-finalizar").addEventListener("click", async () => {
+    document.getElementById("gerarMensagemEtapa4")?.addEventListener("click", async () => {
+      try {
+        await gerarSugestaoEtapa4();
+      } catch (error) {
+        showImportFeedback("Erro ao gerar sugestão", "error", error.message);
+      }
+    });
+
+    // Botão finalizar na Etapa 4 - Enviar para ML
+    document.querySelector(".btn-finalizar-etapa4")?.addEventListener("click", async () => {
       if (!selecionada?.id) return;
 
-      const payload = {
-        produto_confere: document.querySelector("input[name='produto_confere']")?.checked || false,
-        embalagem_integra: !(document.querySelector("input[name='embalagem_rasgada']")?.checked || false),
-        possui_sinais_de_uso: document.querySelector("input[name='produto_sujo']")?.checked || false,
-        item_quebrado: document.querySelector("input[name='produto_quebrado']")?.checked || false,
-        faltando_pecas: document.querySelector("input[name='faltando_pecas']")?.checked || false,
-        motivo_confere: document.querySelector("input[name='motivo_confere']")?.checked || false,
-        embalagem_rasgada: document.querySelector("input[name='embalagem_rasgada']")?.checked || false,
-        produto_amassado: document.querySelector("input[name='produto_amassado']")?.checked || false,
-        produto_riscado: document.querySelector("input[name='produto_riscado']")?.checked || false,
-        produto_quebrado: document.querySelector("input[name='produto_quebrado']")?.checked || false,
-        produto_sujo: document.querySelector("input[name='produto_sujo']")?.checked || false,
-        faltando_acessorios: document.querySelector("input[name='faltando_acessorios']")?.checked || false,
-        produto_errado: document.querySelector("input[name='produto_errado']")?.checked || false,
-        sem_embalagem_original: document.querySelector("input[name='sem_embalagem_original']")?.checked || false,
-        observacoes: document.querySelector("textarea[name='observacoes_checklist']")?.value || ""
-      };
+      const mensagem = document.getElementById("mensagemEtapa4")?.value || "";
+      if (!mensagem.trim()) {
+        showImportFeedback("Erro", "error", "Gere a sugestão antes de finalizar.");
+        return;
+      }
+      const motivoFullSelect = document.getElementById("fullReasonSelect");
+      const motivoFull = String(motivoFullSelect?.value || "").trim();
+      if (fluxoMediacaoAtual?.modo === "return_review_fail" && !motivoFull) {
+        showImportFeedback("Falta selecionar o problema", "error", "Escolha o motivo da revisão Full antes de enviar.");
+        return;
+      }
 
       try {
+        const finalizarBtn = document.querySelector(".btn-finalizar-etapa4");
+        if (finalizarBtn) finalizarBtn.disabled = true;
+        // Salvar checklist primeiro
+        const payload = coletarChecklistPayloadEtapas();
+
         await api(`/api/devolucoes/${selecionada.id}/checklist`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
-        await api(`/api/devolucoes/${selecionada.id}/mediacao/mensagem`, { method: "POST", body: "{}" });
+
+        // Enviar mensagem de mediação para o ML
+        await api(`/api/devolucoes/${selecionada.id}/mediacao/mensagem`, {
+          method: "POST",
+          body: JSON.stringify({ mensagem, reason: motivoFull || undefined })
+        });
+
         document.getElementById("modalChecklistEtapas").close();
-        showImportFeedback("Mensagem da mediacao criada.", "success", "O texto foi montado com checklist e evidencias para usar no Mercado Livre.");
+        showImportFeedback("✅ Mensagem enviada para o Mercado Livre!", "success", "Seu parecer foi registrado. Agora aguarde a resposta.");
+        await carregarTudo();
         await abrirDetalhe(selecionada.id);
+        abrirPainelFlutuante("mediacoes");
       } catch (error) {
-        alert("Erro ao salvar checklist: " + error.message);
+        if (error?.payload?.needs_reason && Array.isArray(error?.payload?.reasons)) {
+          fluxoMediacaoAtual = {
+            modo: "return_review_fail",
+            reasons: error.payload.reasons,
+            default_reason: fluxoMediacaoAtual?.default_reason || "",
+          };
+          atualizarBlocoMotivoFull(fluxoMediacaoAtual);
+        }
+        showImportFeedback("Erro ao enviar", "error", error.message);
+      } finally {
+        const finalizarBtn = document.querySelector(".btn-finalizar-etapa4");
+        if (finalizarBtn) finalizarBtn.disabled = false;
       }
     });
 
@@ -2021,9 +2444,9 @@
           });
           document.getElementById("modalChecklistEtapas").close();
           await carregarTudo();
-          showImportFeedback("Progresso salvo! Você pode continuar depois.", "success");
+          showImportFeedback("⏸️ Progresso salvo! Você pode continuar depois na aba Pendências.", "success");
         } catch (error) {
-          alert("Erro ao salvar progresso: " + error.message);
+          showImportFeedback("Erro ao salvar progresso", "error", error.message);
         }
       });
     });
@@ -2078,7 +2501,10 @@
             const checks = conteudo.checks || {};
             Object.entries(checks).forEach(([name, value]) => {
               const input = document.querySelector(`#modalChecklistEtapas .etapa[data-etapa='1'] input[name='${name}']`);
-              if (input) input.checked = Boolean(value);
+              if (input) {
+                input.checked = Boolean(value);
+                input.dataset.explicit = "1";
+              }
             });
             document.querySelector("textarea[name='observacoes_checklist']").value = conteudo.observacoes || "";
           } catch (e) {
@@ -2086,6 +2512,8 @@
           }
         }
 
+        montarChecklistSimNao();
+        carregarFluxoMediacao(itemId).catch(() => {});
         await carregarEvidenciasChecklistModal(itemId);
         document.getElementById("modalChecklistEtapas").showModal();
       } catch (error) {
@@ -2124,6 +2552,9 @@
         await abrirAtalhoResumo(button.dataset.shortcut || "");
       });
     });
+    document.getElementById("abrirMediacoesResumo")?.addEventListener("click", () => {
+      abrirPainelFlutuante("mediacoes");
+    });
     document.getElementById("metricaTarifas")?.addEventListener("click", () => {
       const hoje = new Date();
       const mesAtual = String(hoje.getMonth() + 1).padStart(2, '0');
@@ -2141,9 +2572,11 @@
             <div class="filtro-grupo">
               <label for="filtroStatus">Status:</label>
               <select id="filtroStatus">
-                <option value="concluidas">Mediações concluídas</option>
-                <option value="com-desconto">Concluídas com tarifa</option>
-                <option value="sem-desconto">Concluídas sem tarifa</option>
+                <option value="todas">Todas</option>
+                <option value="abertas">Em acompanhamento</option>
+                <option value="concluidas">Concluídas</option>
+                <option value="com-desconto">Com tarifa</option>
+                <option value="sem-desconto">Sem tarifa</option>
               </select>
             </div>
           </div>
@@ -2177,7 +2610,6 @@
         const [anoFiltro, mesFiltroNum] = mesFiltro.split('-');
 
         let itensRenderizar = mediacoesAcompanhamento.filter((item) => {
-          if (item.situacao_mediacao !== "concluida") return false;
           const dataSolicitacao = item.data_solicitacao ? new Date(item.data_solicitacao) : null;
           if (!dataSolicitacao) return false;
           const mesItem = String(dataSolicitacao.getMonth() + 1).padStart(2, '0');
@@ -2185,7 +2617,10 @@
           const mesAnoItem = `${anoItem}-${mesItem}`;
           if (mesAnoItem !== mesFiltro) return false;
 
+          const isConcluida = item.situacao_mediacao === "concluida";
           const temTarifa = Number(item.ml_tarifa_devolucao || 0) > 0;
+          if (statusFiltro === "abertas") return !isConcluida;
+          if (statusFiltro === "concluidas") return isConcluida;
           if (statusFiltro === "com-desconto") return temTarifa;
           if (statusFiltro === "sem-desconto") return !temTarifa;
           return true;
@@ -2202,6 +2637,7 @@
         const detalhesHTML = itensRenderizar.map((item) => {
           const temTarifa = Number(item.ml_tarifa_devolucao || 0) > 0;
           const valorTarifa = Number(item.ml_tarifa_devolucao || 0);
+          const detalheMl = mlDetailUrl(item);
           return `
             <div class="metricas-item">
               <div class="metricas-item-info">
@@ -2209,8 +2645,8 @@
                 <span class="metrica-item-nome">${item.produto_nome}</span>
               </div>
               <span class="metrica-item-valor ${temTarifa ? 'com-desconto' : 'sem-desconto'}">${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valorTarifa)}</span>
-              <button class="btn-ver-detalhes" data-item-id="${item.id}" title="Ver detalhes da devolução">
-                <span>Ver detalhes</span>
+              <button class="btn-ver-detalhes" data-ml-url="${detalheMl}" data-item-id="${item.id}" title="Ver detalhes no Mercado Livre">
+                <span>Ver detalhe ML</span>
               </button>
             </div>
           `;
@@ -2220,6 +2656,11 @@
 
         document.querySelectorAll(".btn-ver-detalhes").forEach((btn) => {
           btn.addEventListener("click", async () => {
+            const mlUrl = String(btn.dataset.mlUrl || "").trim();
+            if (mlUrl && mlUrl !== "#") {
+              window.open(mlUrl, "_blank", "noopener");
+              return;
+            }
             const itemId = btn.dataset.itemId;
             document.getElementById("modalPainelFlutuante").close();
             await abrirDetalhe(Number(itemId));
